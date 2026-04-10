@@ -16,7 +16,7 @@ jobs:
           versionSpec: "3.11"
       - script: pip install -r requirements.txt
         displayName: Install dependencies
-      - script: python scanner.py --path . --output results.json --fail-on-high --no-llm
+      - script: python scanner.py --path . --output results.json --fail-on-high --policy policy.yaml --policy-env prod --no-llm
         displayName: Run scanner
       - publish: results.json
         artifact: scan-results

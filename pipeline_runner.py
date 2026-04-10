@@ -69,10 +69,12 @@ class PipelineRunner:
     def _build_default_analyzers(self) -> List[Any]:
         from cli import build_pipeline
         from iam_analyzer import IAMSecurityAnalyzer
+        from prompt_injection_analyzer import PromptInjectionAnalyzer
         from secrets_analyzer import HardcodedSecretsAnalyzer
         from workload_identity_analyzer import WorkloadIdentitySecurityAnalyzer
 
         iam_cfg = self.cfg.get("iam", {})
+        prompt_cfg = self.cfg.get("prompt_injection", {})
         wi_cfg = self.cfg.get("workload_identity", {})
         secrets_cfg = self.cfg.get("secrets", {})
 
@@ -98,6 +100,11 @@ class PipelineRunner:
                 use_llm=self.use_llm,
                 top_k_code=wi_cfg.get("top_k_code", 5),
                 top_k_security=wi_cfg.get("top_k_security", 3),
+            ),
+            PromptInjectionAnalyzer(
+                pipeline=pipeline,
+                use_llm=self.use_llm and prompt_cfg.get("use_llm", True),
+                top_k_security=prompt_cfg.get("top_k_security", 3),
             ),
             HardcodedSecretsAnalyzer(
                 pipeline=pipeline,

@@ -75,7 +75,7 @@ class ReportGenerator:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    def render_table(self, result: Dict[str, Any], max_issues: int = 5) -> str:
+    def render_table(self, result: Dict[str, Any], max_issues: int = 5, policy_result: Dict[str, Any] | None = None) -> str:
         summary = result.get("summary", {})
         issues = result.get("issues", [])
         lines = [
@@ -84,6 +84,9 @@ class ReportGenerator:
             f"HIGH: {summary.get('high', 0)}  MEDIUM: {summary.get('medium', 0)}  LOW: {summary.get('low', 0)}",
             f"Files scanned: {summary.get('files_scanned', 0)}",
         ]
+
+        if int(summary.get("errors", 0) or 0) > 0:
+            lines.append(f"Execution errors: {summary.get('errors', 0)}")
 
         if issues:
             lines.append("")
@@ -96,5 +99,21 @@ class ReportGenerator:
         else:
             lines.append("")
             lines.append("No issues detected.")
+
+        if policy_result:
+            lines.append("")
+            if int(summary.get("errors", 0) or 0) > 0:
+                lines.append("Build policy: NOT EVALUATED")
+            elif policy_result.get("status") == "fail":
+                lines.append("Build policy: FAIL")
+                for violation in policy_result.get("violations", []):
+                    lines.append(f"- {violation}")
+                for detail in policy_result.get("details", []):
+                    affected = ", ".join(detail.get("affected_files", [])[:5]) or "no files recorded"
+                    lines.append(
+                        f"  Affected {detail.get('severity', '')}: {affected}"
+                    )
+            else:
+                lines.append("Build policy: PASS")
 
         return "\n".join(lines)

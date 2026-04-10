@@ -231,10 +231,14 @@ class MetadataStore:
             or meta.get("block_type", "")
             or ""
         )
-        cloud_provider = detect_cloud_provider(
-            resource_type=resource_type,
-            content=content,
-            file_path=chunk.get("file_path", ""),
+        cloud_provider = (
+            chunk.get("cloud_provider")
+            or meta.get("cloud_provider")
+            or detect_cloud_provider(
+                resource_type=resource_type,
+                content=content,
+                file_path=chunk.get("file_path", ""),
+            )
         )
         timestamp: str = chunk.get("timestamp") or time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
@@ -651,7 +655,7 @@ class VectorStoreManager:
             self._faiss_index, str(self.index_path) + ".faiss"
         )
         logger.info(
-            "FAISS index saved (%d vectors) → %s.faiss",
+            "FAISS index saved (%d vectors) -> %s.faiss",
             self._faiss_index.ntotal,
             self.index_path,
         )
@@ -660,14 +664,13 @@ class VectorStoreManager:
         faiss = self._faiss_import()
         idx_file    = str(self.index_path) + ".faiss"
         pkl_file    = str(self.index_path) + ".chunks.pkl"
-        db_file     = str(self.index_path) + ".db"
 
         if not Path(idx_file).exists():
             return False
 
         self._faiss_index = faiss.read_index(idx_file)
         logger.info(
-            "FAISS index loaded (%d vectors) ← %s.faiss",
+            "FAISS index loaded (%d vectors) <- %s.faiss",
             self._faiss_index.ntotal,
             self.index_path,
         )
@@ -1036,10 +1039,13 @@ class VectorStoreManager:
         self.add_embeddings(embeddings, chunks)
 
     def search(
-        self, query_embedding: np.ndarray, top_k: int = 5
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 5,
+        metadata_filter: Optional[Dict[str, str]] = None,
     ) -> List[SearchResult]:
         """Backward-compatible alias for ``similarity_search()``."""
-        return self.similarity_search(query_embedding, k=top_k)
+        return self.similarity_search(query_embedding, k=top_k, metadata_filter=metadata_filter)
 
     # ==================================================================
     # Persistence
@@ -1086,6 +1092,32 @@ class VectorStoreManager:
     def save(self) -> None:
         """Backward-compatible alias for ``save_index()``."""
         self.save_index()
+
+    def has_persisted_state(self) -> bool:
+        """Return True if on-disk vector-store artifacts exist."""
+        if self.backend == "faiss":
+            return any(
+                Path(str(self.index_path) + suffix).exists()
+                for suffix in (".faiss", ".db", ".chunks.pkl")
+            )
+        return Path(self.chroma_persist_dir).exists()
+
+    def reset_persistence(self) -> None:
+        """Remove persisted artifacts and reset in-memory state."""
+        if self.backend == "faiss":
+            for suffix in (".faiss", ".db", ".chunks.pkl"):
+                path = Path(str(self.index_path) + suffix)
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    logger.warning("Failed to remove stale vector-store artifact: %s", path)
+            self._faiss_index = None
+            self._meta = MetadataStore(str(self.index_path) + ".db")
+            self.embedding_dim = None
+            return
+
+        self._chroma_collection = None
 
     def load(self) -> bool:
         """

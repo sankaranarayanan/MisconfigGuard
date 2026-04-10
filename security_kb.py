@@ -71,6 +71,27 @@ _BUILT_IN_RULES: List[Dict[str, str]] = [
         "references":  "CWE-798, OWASP A02:2021, CIS AWS 1.12",
     },
     {
+        "id":          "owasp-llm-01",
+        "category":    "owasp",
+        "severity":    "HIGH",
+        "title":       "Prompt Injection in AI-Driven Pipelines",
+        "description": (
+            "Pipeline steps that pass untrusted text into LLM prompts or embed "
+            "instructions such as 'ignore previous instructions' can manipulate "
+            "AI-assisted workflow behavior, override safeguards, or coerce the "
+            "model into exposing sensitive data."
+        ),
+        "indicators":  (
+            "ignore previous instructions, override system prompt, send secrets to external endpoint, "
+            "github.event.pull_request.body, github.event.pull_request.title, prompt injection, ai workflow"
+        ),
+        "remediation": (
+            "Treat pipeline-supplied AI inputs as untrusted. Sanitize or strip hostile instruction patterns, "
+            "avoid concatenating PR metadata directly into prompts, and keep system prompts or tool instructions immutable."
+        ),
+        "references":  "OWASP LLM Top 10 LLM01, CWE-74",
+    },
+    {
         "id":          "owasp-iac-02",
         "category":    "owasp",
         "severity":    "HIGH",
@@ -869,9 +890,12 @@ class SecurityRuleResult:
     title:     str
     severity:  str
     category:  str
-    text:      str      # full rule text used for embedding
-    score:     float    # similarity score [0, 1]
-    rank:      int
+    description: str = ""
+    resource_type: str = "general"
+    cloud_provider: str = "generic"
+    text:      str = ""      # full rule text used for embedding
+    score:     float = 0.0    # similarity score [0, 1]
+    rank:      int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -879,6 +903,9 @@ class SecurityRuleResult:
             "title":    self.title,
             "severity": self.severity,
             "category": self.category,
+            "description": self.description,
+            "resource_type": self.resource_type,
+            "cloud_provider": self.cloud_provider,
             "text":     self.text,
             "score":    self.score,
             "rank":     self.rank,
@@ -918,9 +945,11 @@ class SecurityKnowledgeBase:
         extra_rules: Optional[List[Dict]] = None,
     ) -> None:
         from vector_store_manager import VectorStoreManager
+        from rule_repository import RuleRepository
 
         self._embedder  = embedder
-        self._all_rules = list(_BUILT_IN_RULES) + list(extra_rules or [])
+        self._repository = RuleRepository(extra_rules=extra_rules)
+        self._all_rules = self._repository.list_rules()
 
         # Separate VectorStoreManager so rules live in their own index.
         self._store = VectorStoreManager(
@@ -929,7 +958,7 @@ class SecurityKnowledgeBase:
         )
         # Parallel id → rule metadata lookup.
         self._rule_meta: Dict[str, Dict] = {
-            r["id"]: r for r in self._all_rules
+            r["rule_id"]: r for r in self._all_rules
         }
         # Map numeric index → rule_id so we can reconstruct after search.
         self._index_to_rule_id: List[str] = []
@@ -941,7 +970,7 @@ class SecurityKnowledgeBase:
     def _rule_to_text(self, rule: Dict) -> str:
         """Concatenate rule fields into a single embeddable document."""
         return (
-            f"[{rule['category'].upper()} | {rule['severity']}] "
+            f"[{rule['category'].upper()} | {rule['severity']} | {rule['cloud_provider']} | {rule['resource_type']}] "
             f"{rule['title']}\n\n"
             f"{rule['description']}\n\n"
             f"Indicators: {rule['indicators']}\n\n"
@@ -962,24 +991,29 @@ class SecurityKnowledgeBase:
         chunks = []
         for i, rule in enumerate(self._all_rules):
             chunks.append({
-                "chunk_id":    rule["id"],
+                "chunk_id":    rule["rule_id"],
                 "text":        texts[i],
                 "file_path":   f"security_kb/{rule['category']}",
                 "file_type":   "security_rule",
                 "chunk_index": i,
                 "tokens":      len(texts[i].split()),
                 "dependencies": [],
+                "resource_type": rule.get("resource_type", "general"),
+                "cloud_provider": rule.get("cloud_provider", "generic"),
                 "metadata": {
-                    "rule_id":   rule["id"],
+                    "rule_id":   rule["rule_id"],
                     "category":  rule["category"],
                     "severity":  rule["severity"],
                     "title":     rule["title"],
+                    "description": rule.get("description", ""),
+                    "resource_type": rule.get("resource_type", "general"),
+                    "cloud_provider": rule.get("cloud_provider", "generic"),
                 },
             })
 
         self._store.add_embeddings(embeddings, chunks)
         self._store.save_index()
-        self._index_to_rule_id = [r["id"] for r in self._all_rules]
+        self._index_to_rule_id = [r["rule_id"] for r in self._all_rules]
 
         logger.info("SecurityKnowledgeBase built: %d rules indexed", len(self._all_rules))
         return len(self._all_rules)
@@ -992,7 +1026,7 @@ class SecurityKnowledgeBase:
         """
         if self._store.load():
             n = self._store.total_vectors
-            self._index_to_rule_id = [r["id"] for r in self._all_rules[:n]]
+            self._index_to_rule_id = [r["rule_id"] for r in self._all_rules[:n]]
             logger.info("SecurityKnowledgeBase loaded: %d rules", n)
             return n
         return self.build()
@@ -1004,30 +1038,38 @@ class SecurityKnowledgeBase:
         *rules* must have the same schema as the built-in rule dicts.
         Returns the number of new rules added.
         """
-        texts = [self._rule_to_text(r) for r in rules]
+        from rule_repository import RuleRepository
+
+        normalized_rules = RuleRepository(extra_rules=rules).list_rules()[-len(rules):]
+        texts = [self._rule_to_text(r) for r in normalized_rules]
         embeddings = self._embedder.embed(texts)
         chunks = [
             {
-                "chunk_id":    r["id"],
+                "chunk_id":    r["rule_id"],
                 "text":        texts[i],
                 "file_path":   f"security_kb/{r.get('category', 'custom')}",
                 "file_type":   "security_rule",
                 "chunk_index": self._store.total_vectors + i,
                 "tokens":      len(texts[i].split()),
                 "dependencies": [],
+                "resource_type": r.get("resource_type", "general"),
+                "cloud_provider": r.get("cloud_provider", "generic"),
                 "metadata": {
-                    "rule_id":  r["id"],
+                    "rule_id":  r["rule_id"],
                     "category": r.get("category", "custom"),
                     "severity": r.get("severity", "INFO"),
                     "title":    r.get("title", ""),
+                    "description": r.get("description", ""),
+                    "resource_type": r.get("resource_type", "general"),
+                    "cloud_provider": r.get("cloud_provider", "generic"),
                 },
             }
-            for i, r in enumerate(rules)
+            for i, r in enumerate(normalized_rules)
         ]
         added = self._store.add_embeddings(embeddings, chunks)
-        self._all_rules.extend(rules)
-        for r in rules:
-            self._rule_meta[r["id"]] = r
+        self._all_rules.extend(normalized_rules)
+        for r in normalized_rules:
+            self._rule_meta[r["rule_id"]] = r
         self._store.save_index()
         logger.info("SecurityKnowledgeBase: added %d custom rules", added)
         return added
@@ -1040,6 +1082,7 @@ class SecurityKnowledgeBase:
         self,
         query_embedding: "np.ndarray",
         top_k: int = 3,
+        metadata_filter: Optional[Dict[str, str]] = None,
     ) -> List[SecurityRuleResult]:
         """
         Return the *top_k* most relevant security rules for *query_embedding*.
@@ -1049,7 +1092,7 @@ class SecurityKnowledgeBase:
         if self._store.total_vectors == 0:
             return []
 
-        raw = self._store.search(query_embedding, top_k=top_k)
+        raw = self._store.search(query_embedding, top_k=top_k, metadata_filter=metadata_filter)
         results: List[SecurityRuleResult] = []
         for r in raw:
             meta = r.chunk.get("metadata", {})
@@ -1061,6 +1104,9 @@ class SecurityKnowledgeBase:
                     title    = rule.get("title", meta.get("title", "")),
                     severity = rule.get("severity", meta.get("severity", "INFO")),
                     category = rule.get("category", meta.get("category", "")),
+                    description = rule.get("description", meta.get("description", "")),
+                    resource_type = rule.get("resource_type", meta.get("resource_type", "general")),
+                    cloud_provider = rule.get("cloud_provider", meta.get("cloud_provider", "generic")),
                     text     = r.chunk.get("text", ""),
                     score    = r.score,
                     rank     = r.rank,

@@ -21,7 +21,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run Scanner
-        run: python scanner.py --path . --output results.json --fail-on-high --sarif-output results.sarif --no-llm
+        run: python scanner.py --path . --output results.json --fail-on-high --policy policy.yaml --policy-env prod --sarif-output results.sarif --no-llm
 
       - name: Upload JSON Results
         if: always()

@@ -41,6 +41,19 @@ retrieval:
   cache_ttl: 300             # retrieval cache TTL in seconds (0 = disabled)
   max_context_tokens: 3000   # max tokens in assembled prompt context
 
+query_routing:
+  enabled: true
+  use_llm_routing: true
+  routing_model: "llama3"
+  routing_max_tokens: 20
+  routing_cache_ttl: 300
+  log_intent: true
+
+rule_aware:
+  enabled: true              # filter security rules by matched resource metadata before LLM analysis
+  cache_ttl: 300             # cache filtered rule combinations for repeated queries
+  include_generic_rules: true
+
 iam:
   max_roles_per_identity: 3  # flag identities exceeding this many role assignments
   high_privilege_roles:      # roles always checked regardless of scope
@@ -56,11 +69,27 @@ workload_identity:
   top_k_code: 5
   top_k_security: 3
 
+prompt_injection:
+  use_llm: true              # enrich prompt-injection findings with LLM validation when available
+  top_k_security: 3
+
 secrets:
   use_llm: true              # enrich hardcoded secret findings with LLM reasoning
   top_k_code: 5
   top_k_security: 3
   entropy_threshold: 4.5
+
+policy:
+  path: "./policy.yaml"      # default policy file used by scanner.py
+  environment: "dev"         # override with MISCONFIGGUARD_POLICY_ENV or --policy-env
+  fail_on:
+    high: true
+    medium: false
+    low: false
+  max_allowed:
+    high: 0
+    medium: 5
+    low: 10
 
 logging:
   level: "INFO"

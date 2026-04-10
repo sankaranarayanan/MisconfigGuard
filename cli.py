@@ -114,6 +114,12 @@ def build_pipeline(cfg: dict):
             max_tokens=llm.get("max_tokens", 2048),
         ),
         expand_dependencies=ck.get("resolve_dependencies", True),
+        query_routing_cfg=cfg.get("query_routing", {}),
+        retrieval_cfg=cfg.get("retrieval", {}),
+        iam_cfg=cfg.get("iam", {}),
+        workload_identity_cfg=cfg.get("workload_identity", {}),
+        prompt_injection_cfg=cfg.get("prompt_injection", {}),
+        secrets_cfg=cfg.get("secrets", {}),
     )
 
 
@@ -240,26 +246,19 @@ def cmd_query(args: argparse.Namespace, cfg: dict) -> None:
         )
         sys.exit(1)
 
-    if getattr(args, "structured", False):
-        ret = cfg.get("retrieval", {})
-        result = pipeline.analyze_structured(
-            query           = args.query,
-            top_k_code      = args.top_k,
-            top_k_security  = ret.get("top_k_security", 3),
-            metadata_filter = _parse_metadata_filter(args),
-            stream          = args.stream,
-            semantic_weight = ret.get("semantic_weight", 0.7),
-            keyword_weight  = ret.get("keyword_weight", 0.3),
-            cache_ttl       = ret.get("cache_ttl", 300),
-        )
-        _print_structured(result, args)
-    else:
-        result = pipeline.analyze(
-            query=args.query,
-            top_k=args.top_k,
-            stream=args.stream,
-        )
-        _print_plain(result, args)
+    result = pipeline.query(
+        args.query,
+        top_k=args.top_k,
+        use_llm_routing=not getattr(args, "no_llm_routing", False),
+        structured=getattr(args, "structured", False),
+        stream=args.stream,
+    )
+    print(f"\n[Routed to module: {result['intent']}]\n")
+    print(result.get("analysis", ""))
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.output, "w") as fh:
+            json.dump(result, fh, indent=2)
 
 
 # ------------------------------------------------------------------
@@ -353,6 +352,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Use hybrid retrieval + security KB for structured JSON output "
             "(issues list with severity, recommendations, and evidence)"
         ),
+    )
+    p_query.add_argument(
+        "--no-llm-routing",
+        action="store_true",
+        dest="no_llm_routing",
+        help="Skip LLM classification and use keyword heuristics only",
     )
     p_query.add_argument(
         "--cloud",

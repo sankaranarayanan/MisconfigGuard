@@ -82,7 +82,7 @@ class FileParser:
 
         if file_type == "yaml":
             try:
-                yaml.safe_load(content)
+                list(yaml.safe_load_all(content))
             except yaml.YAMLError as exc:
                 logger.error("YAML parse error in %s: %s", path, exc)
                 return False

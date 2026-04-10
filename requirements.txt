@@ -16,7 +16,7 @@ tiktoken>=0.7.0           # accurate token counting (cl100k_base encoder)
 python-hcl2>=4.3.0        # optional: HCL2 parser for richer Terraform analysis
 
 # Hybrid retrieval
-rank-bm25>=0.3.1          # BM25Okapi keyword search engine
+rank-bm25>=0.2.2          # BM25Okapi keyword search engine
 
 # CLI
 typer[all]>=0.12.0        # optional rich CLI (used alongside argparse)

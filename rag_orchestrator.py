@@ -51,8 +51,10 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from context_builder import ContextBuilder
 from prompt_builder import PromptBuilder
 from hybrid_retriever import HybridRetriever, RetrievalResult
+from rule_aware_retriever import RuleAwareRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +136,8 @@ def _normalise_issues(raw_issues: List[Any]) -> List[dict]:
         "recommendation":    "",
         "cwe":               "",
         "owasp":             "",
+        "rule_id":           "",
+        "rule_description":  "",
     }
     result = []
     for item in (raw_issues or []):
@@ -187,11 +191,19 @@ class RAGOrchestrator:
     ) -> None:
         self.retriever      = hybrid_retriever
         self.prompt_builder = prompt_builder
+        self.context_builder = ContextBuilder(prompt_builder)
         self.llm_client     = llm_client
         self.security_kb    = security_kb
         self.top_k_code     = top_k_code
         self.top_k_security = top_k_security
         self.cache_ttl      = cache_ttl
+        self.rule_aware_retriever = None
+        if self.security_kb is not None:
+            self.rule_aware_retriever = RuleAwareRetriever(
+                code_retriever=self.retriever,
+                security_kb=self.security_kb,
+                embedder=self.retriever.embedder,
+            )
 
         # TTL cache: key → (result_dict, expiry_timestamp)
         self._cache: Dict[str, Tuple[dict, float]] = {}
@@ -251,6 +263,7 @@ class RAGOrchestrator:
         stream:          bool = False,
         top_k_code:      Optional[int] = None,
         top_k_security:  Optional[int] = None,
+        intent_hint:     str = "",
     ) -> dict:
         """
         Perform retrieval-augmented security analysis for *query*.
@@ -289,17 +302,28 @@ class RAGOrchestrator:
                     result["metadata"]["cached"] = True
                     return result
 
-        # Retrieve code chunks (hybrid)
-        code_results = self._retrieve_code(query, k_code, metadata_filter)
-
-        # Retrieve security rules (semantic via KB)
-        security_results = self._retrieve_security_rules(query, k_sec, code_results)
+        matched_resources: List[dict] = []
+        if self.rule_aware_retriever is not None:
+            bundle = self.rule_aware_retriever.retrieve(
+                query=query,
+                top_k_code=k_code,
+                top_k_rules=k_sec,
+                metadata_filter=metadata_filter,
+            )
+            code_results = bundle.get("code_results", [])
+            security_results = bundle.get("security_results", [])
+            matched_resources = bundle.get("matched_resources", [])
+        else:
+            code_results = self._retrieve_code(query, k_code, metadata_filter)
+            security_results = self._retrieve_security_rules(query, k_sec, code_results)
 
         # Assemble prompt
-        prompt = self.prompt_builder.build(
+        prompt = self.context_builder.build(
             query            = query,
             code_results     = code_results,
             security_results = security_results,
+            matched_resources = matched_resources,
+            intent_hint      = intent_hint,
         )
 
         # Call LLM
@@ -307,6 +331,7 @@ class RAGOrchestrator:
 
         # Parse structured output
         issues, summary = _parse_structured_output(raw_analysis)
+        issues = self._enrich_issues_with_rules(issues, security_results)
 
         result = {
             "query":  query,
@@ -330,6 +355,7 @@ class RAGOrchestrator:
                     "code_count":     len(code_results),
                     "security_count": len(security_results),
                 },
+                "matched_resources": matched_resources,
                 "cached": False,
             },
         }
@@ -393,13 +419,26 @@ class RAGOrchestrator:
             logger.warning("Security KB retrieval failed: %s", exc)
             return []
 
+    def _enrich_issues_with_rules(self, issues: List[dict], security_results: List[Any]) -> List[dict]:
+        if not issues or not security_results:
+            return issues
+        primary_rule = security_results[0]
+        for issue in issues:
+            if not issue.get("rule_id"):
+                issue["rule_id"] = getattr(primary_rule, "rule_id", "")
+            if not issue.get("rule_description"):
+                issue["rule_description"] = getattr(primary_rule, "description", "")
+        return issues
+
     def _call_llm(self, prompt: str, stream: bool = False) -> str:
         """Call the local LLM and return the raw response text."""
         try:
-            if stream and hasattr(self.llm_client, "generate_stream"):
+            if stream and hasattr(self.llm_client, "stream_generate"):
                 chunks = []
-                for tok in self.llm_client.generate_stream(prompt):
+                for tok in self.llm_client.stream_generate(prompt):
+                    print(tok, end="", flush=True)
                     chunks.append(tok)
+                print()
                 return "".join(chunks)
             return self.llm_client.generate(prompt)
         except Exception as exc:

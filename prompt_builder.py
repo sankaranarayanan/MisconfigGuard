@@ -259,9 +259,11 @@ class PromptBuilder:
             title     = getattr(res, "title",    res.get("title", "Rule") if isinstance(res, dict) else "Rule")
             severity  = getattr(res, "severity", res.get("severity", "") if isinstance(res, dict) else "")
             rule_id   = getattr(res, "rule_id",  res.get("rule_id", "") if isinstance(res, dict) else "")
+            cloud_provider = getattr(res, "cloud_provider", res.get("cloud_provider", "") if isinstance(res, dict) else "")
+            resource_type  = getattr(res, "resource_type", res.get("resource_type", "") if isinstance(res, dict) else "")
             text      = getattr(res, "text",     res.get("text", "") if isinstance(res, dict) else "")
 
-            header = f"### [{i}] {rule_id} — {title} (Severity: {severity})"
+            header = f"### [{i}] {rule_id} — {title} (Severity: {severity}, Cloud: {cloud_provider}, Resource: {resource_type})"
             body   = _truncate(text, per_rule_budget)
             entry  = f"{header}\n{body}"
             cost   = _count_tokens(entry)

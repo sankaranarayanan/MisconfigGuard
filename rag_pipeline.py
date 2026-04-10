@@ -47,6 +47,7 @@ from file_scanner import FileScanner
 from git_ingestor import GitIngestor
 from intelligent_chunker import IntelligentChunker
 from local_llm_client import LocalLLMClient
+from resource_tagger import ResourceTagger
 from vector_store_manager import SearchResult, VectorStoreManager
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,17 @@ class _IndexRegistry:
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(self._registry, indent=2))
+
+    def has_entries(self) -> bool:
+        return bool(self._registry)
+
+    def clear(self) -> None:
+        self._registry.clear()
+        try:
+            if self._path.exists():
+                self._path.unlink()
+        except OSError:
+            logger.warning("Failed to remove stale index registry: %s", self._path)
 
     @staticmethod
     def _hash(content: str) -> str:
@@ -115,6 +127,12 @@ class RAGPipeline:
         incremental: bool = True,
         registry_path: str = "./cache/index_registry.json",
         expand_dependencies: bool = False,
+        query_routing_cfg: Optional[dict] = None,
+        retrieval_cfg: Optional[dict] = None,
+        iam_cfg: Optional[dict] = None,
+        workload_identity_cfg: Optional[dict] = None,
+        prompt_injection_cfg: Optional[dict] = None,
+        secrets_cfg: Optional[dict] = None,
     ):
         """
         Args:
@@ -139,11 +157,26 @@ class RAGPipeline:
         self.embedder = embedder or EmbeddingGenerator()
         self.vector_store = vector_store or VectorStoreManager()
         self.llm_client = llm_client or LocalLLMClient()
+        self.resource_tagger = ResourceTagger()
         self.batch_embed_size = batch_embed_size
         self.max_workers = max_workers
         self.incremental = incremental
         self.expand_dependencies = expand_dependencies
         self._registry = _IndexRegistry(registry_path) if incremental else None
+        self.query_routing_cfg = {
+            "enabled": True,
+            "use_llm_routing": True,
+            "routing_model": getattr(self.llm_client, "model", "llama3"),
+            "routing_max_tokens": 20,
+            "routing_cache_ttl": 300,
+            "log_intent": True,
+            **(query_routing_cfg or {}),
+        }
+        self.retrieval_cfg = retrieval_cfg or {}
+        self.iam_cfg = iam_cfg or {}
+        self.workload_identity_cfg = workload_identity_cfg or {}
+        self.prompt_injection_cfg = prompt_injection_cfg or {}
+        self.secrets_cfg = secrets_cfg or {}
 
     # ==================================================================
     # Shared ingestion kernel
@@ -151,9 +184,25 @@ class RAGPipeline:
 
     def _process_batch(self, chunk_batch: list) -> None:
         """Embed *chunk_batch* and push vectors + metadata to the store."""
-        texts = [c.text for c in chunk_batch]
+        tagged_chunks = [self.resource_tagger.tag_chunk(c.to_dict()) for c in chunk_batch]
+        texts = [chunk["text"] for chunk in tagged_chunks]
         embeddings = self.embedder.embed(texts)
-        self.vector_store.add(embeddings, [c.to_dict() for c in chunk_batch])
+        self.vector_store.add(embeddings, tagged_chunks)
+
+    def _reconcile_incremental_state(self) -> None:
+        """Load existing persistence or reset stale incremental state."""
+        if not self.incremental or self._registry is None:
+            return
+        if self.vector_store.total_vectors > 0:
+            return
+        if self.vector_store.load():
+            return
+        if self._registry.has_entries() or self.vector_store.has_persisted_state():
+            logger.warning(
+                "Incremental registry/vector store state is stale; clearing cached state and rebuilding index"
+            )
+            self._registry.clear()
+            self.vector_store.reset_persistence()
 
     def _should_skip(self, record: dict) -> bool:
         """Return True if this file was already indexed with identical content."""
@@ -258,6 +307,7 @@ class RAGPipeline:
             Total number of NEW chunks added to the vector store.
         """
         logger.info("Ingesting local directory: %s", directory)
+        self._reconcile_incremental_state()
         if parallel:
             total = self._ingest_directory_parallel(directory)
         else:
@@ -290,6 +340,7 @@ class RAGPipeline:
             Total number of chunks added to the vector store.
         """
         logger.info("Ingesting Git repository: %s", url)
+        self._reconcile_incremental_state()
         ingestor = GitIngestor(clone_dir=clone_dir, scanner=self.scanner)
         records = self.parser.parse_repository(
             ingestor, url, token=token, branch=branch
@@ -405,24 +456,6 @@ class RAGPipeline:
         """
         logger.info("RAG query: %r", query)
 
-        # Graceful degradation when Ollama is not running
-        if not self.llm_client.is_available():
-            logger.warning(
-                "Ollama is not reachable — returning retrieval results only. "
-                "Start Ollama with:  ollama serve"
-            )
-            results = self.retrieve(query, top_k=top_k)
-            return {
-                "query": query,
-                "context": self._build_context(results),
-                "results": [r.chunk for r in results],
-                "analysis": (
-                    "[Ollama unavailable]  "
-                    "Install Ollama from https://ollama.com and run: "
-                    f"ollama pull {self.llm_client.model} && ollama serve"
-                ),
-            }
-
         results = self.retrieve(query, top_k=top_k)
         if not results:
             return {
@@ -435,17 +468,72 @@ class RAGPipeline:
                 ),
             }
 
-        context = self._build_context(results)
-        analysis = self.llm_client.analyze_security(
-            context=context, query=query, stream=stream
-        )
+        if not self.llm_client.is_available():
+            logger.warning(
+                "Ollama is not reachable - returning retrieval results only. "
+                "Start Ollama with: ollama serve"
+            )
+            return {
+                "query": query,
+                "context": self._build_context(results),
+                "results": [r.chunk for r in results],
+                "analysis": (
+                    "[Ollama unavailable] Install Ollama from https://ollama.com and run: "
+                    f"ollama pull {self.llm_client.model} && ollama serve"
+                ),
+            }
 
+        routed = self.query(
+            query=query,
+            top_k=top_k,
+            use_llm_routing=self.query_routing_cfg.get("use_llm_routing", True),
+            structured=False,
+            stream=stream,
+        )
         return {
             "query": query,
-            "context": context,
-            "results": [r.chunk for r in results],
-            "analysis": analysis,
+            "context": routed.get("context", ""),
+            "results": routed.get("results", []),
+            "analysis": routed.get("analysis", ""),
         }
+
+    def query(
+        self,
+        query: str,
+        top_k: int = 5,
+        use_llm_routing: bool = True,
+        structured: bool = False,
+        stream: bool = False,
+    ) -> dict:
+        from query_dispatcher import QueryDispatcher
+        from query_router import QueryRouter
+
+        router = QueryRouter(
+            llm_client=self.llm_client,
+            use_llm_routing=use_llm_routing and self.query_routing_cfg.get("enabled", True),
+            routing_model=self.query_routing_cfg.get("routing_model"),
+            routing_max_tokens=self.query_routing_cfg.get("routing_max_tokens", 20),
+            cache_ttl=self.query_routing_cfg.get("routing_cache_ttl", 300),
+        )
+        intent = router.classify(query)
+        if self.query_routing_cfg.get("log_intent", True):
+            logger.info("[QueryRouter] intent=%s for query: %r", intent.value, query)
+
+        dispatcher = QueryDispatcher(rag_pipeline=self)
+        result = dispatcher.dispatch(query, intent, top_k=top_k, stream=stream)
+        if structured and not result.get("findings"):
+            findings, summary = [], ""
+            try:
+                from rag_orchestrator import _parse_structured_output
+                findings, summary = _parse_structured_output(result.get("analysis", ""))
+            except Exception:
+                findings, summary = [], ""
+            if findings:
+                result["findings"] = findings
+                result["issues"] = findings
+            if summary and not result.get("summary"):
+                result["summary"] = summary
+        return result
 
     def analyze_structured(
         self,
