@@ -1,0 +1,26 @@
+# Core dependencies
+gitpython>=3.1.40
+pyyaml>=6.0.1
+requests>=2.31.0
+numpy>=1.26.0
+
+# Embedding model
+sentence-transformers>=2.7.0
+
+# Vector stores
+faiss-cpu>=1.8.0          # default vector store
+chromadb>=0.5.0           # optional persistent vector store
+
+# Intelligent chunking
+tiktoken>=0.7.0           # accurate token counting (cl100k_base encoder)
+python-hcl2>=4.3.0        # optional: HCL2 parser for richer Terraform analysis
+
+# Hybrid retrieval
+rank-bm25>=0.3.1          # BM25Okapi keyword search engine
+
+# CLI
+typer[all]>=0.12.0        # optional rich CLI (used alongside argparse)
+
+# Dev / testing
+pytest>=8.0.0
+pytest-cov>=5.0.0
