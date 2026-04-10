@@ -7,7 +7,10 @@ Run:
 """
 
 import json
+import logging
+import sys
 import tempfile
+import types
 from pathlib import Path
 
 import numpy as np
@@ -332,6 +335,111 @@ class TestEmbeddingGenerator:
         second = gen.embed([text])  # should NOT call the model
 
         np.testing.assert_array_equal(first, second)
+
+    def test_model_load_quiets_third_party_logs(self, tmp_path, monkeypatch):
+        from embedding_generator import EmbeddingGenerator
+
+        transformer_state = {
+            "verbosity": 20,
+            "progress_enabled": True,
+            "disable_calls": 0,
+            "enable_calls": 0,
+            "restored_to": [],
+        }
+        hf_state = {
+            "verbosity": 20,
+            "progress_disabled": False,
+            "disable_calls": 0,
+            "enable_calls": 0,
+            "restored_to": [],
+        }
+
+        transformers_logging = types.ModuleType("transformers.utils.logging")
+        transformers_logging.ERROR = 40
+        transformers_logging.get_verbosity = lambda: transformer_state["verbosity"]
+        transformers_logging.set_verbosity_error = lambda: transformer_state.update({"verbosity": 40})
+
+        def _set_transformers_verbosity(level):
+            transformer_state["verbosity"] = level
+            transformer_state["restored_to"].append(level)
+
+        transformers_logging.set_verbosity = _set_transformers_verbosity
+        transformers_logging.is_progress_bar_enabled = lambda: transformer_state["progress_enabled"]
+        transformers_logging.disable_progress_bar = lambda: transformer_state.update({
+            "progress_enabled": False,
+            "disable_calls": transformer_state["disable_calls"] + 1,
+        })
+        transformers_logging.enable_progress_bar = lambda: transformer_state.update({
+            "progress_enabled": True,
+            "enable_calls": transformer_state["enable_calls"] + 1,
+        })
+
+        transformers_utils = types.ModuleType("transformers.utils")
+        transformers_utils.logging = transformers_logging
+        transformers_module = types.ModuleType("transformers")
+        transformers_module.utils = transformers_utils
+
+        hf_logging = types.ModuleType("huggingface_hub.utils.logging")
+        hf_logging.get_verbosity = lambda: hf_state["verbosity"]
+        hf_logging.set_verbosity_error = lambda: hf_state.update({"verbosity": 40})
+
+        def _set_hf_verbosity(level):
+            hf_state["verbosity"] = level
+            hf_state["restored_to"].append(level)
+
+        hf_logging.set_verbosity = _set_hf_verbosity
+
+        hf_utils = types.ModuleType("huggingface_hub.utils")
+        hf_utils.logging = hf_logging
+        hf_utils.are_progress_bars_disabled = lambda: hf_state["progress_disabled"]
+        hf_utils.disable_progress_bars = lambda: hf_state.update({
+            "progress_disabled": True,
+            "disable_calls": hf_state["disable_calls"] + 1,
+        })
+        hf_utils.enable_progress_bars = lambda: hf_state.update({
+            "progress_disabled": False,
+            "enable_calls": hf_state["enable_calls"] + 1,
+        })
+
+        hf_module = types.ModuleType("huggingface_hub")
+        hf_module.utils = hf_utils
+
+        sentence_transformers_module = types.ModuleType("sentence_transformers")
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name):
+                self.model_name = model_name
+
+            def get_sentence_embedding_dimension(self):
+                return 8
+
+        sentence_transformers_module.SentenceTransformer = FakeSentenceTransformer
+
+        monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+        monkeypatch.setitem(sys.modules, "transformers.utils", transformers_utils)
+        monkeypatch.setitem(sys.modules, "transformers.utils.logging", transformers_logging)
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hf_module)
+        monkeypatch.setitem(sys.modules, "huggingface_hub.utils", hf_utils)
+        monkeypatch.setitem(sys.modules, "huggingface_hub.utils.logging", hf_logging)
+        monkeypatch.setitem(sys.modules, "sentence_transformers", sentence_transformers_module)
+
+        httpx_logger = logging.getLogger("httpx")
+        original_httpx_level = httpx_logger.level
+        httpx_logger.setLevel(logging.INFO)
+
+        gen = EmbeddingGenerator(cache_dir=str(tmp_path / "emb_cache"))
+        model = gen.model
+
+        assert isinstance(model, FakeSentenceTransformer)
+        assert transformer_state["disable_calls"] >= 1
+        assert transformer_state["enable_calls"] >= 1
+        assert transformer_state["restored_to"][-1] == 20
+        assert hf_state["disable_calls"] >= 1
+        assert hf_state["enable_calls"] >= 1
+        assert hf_state["restored_to"][-1] == 20
+        assert httpx_logger.level == logging.INFO
+
+        httpx_logger.setLevel(original_httpx_level)
 
 
 # ===========================================================================

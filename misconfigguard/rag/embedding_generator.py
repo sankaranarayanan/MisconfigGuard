@@ -11,6 +11,7 @@ Recommended models:
 """
 
 import hashlib
+from contextlib import contextmanager
 import logging
 import pickle
 from pathlib import Path
@@ -47,6 +48,78 @@ class EmbeddingGenerator:
         self.batch_size = batch_size
         self._model = None  # lazy-loaded
 
+    @contextmanager
+    def _quiet_model_load(self):
+        """Temporarily suppress noisy third-party model-load logs and progress bars."""
+        logger_names = (
+            "httpx",
+            "httpcore",
+            "huggingface_hub",
+            "transformers",
+            "sentence_transformers",
+        )
+        original_logger_levels = {
+            name: logging.getLogger(name).level for name in logger_names
+        }
+
+        transformers_logging = None
+        transformers_verbosity = None
+        transformers_progress_enabled = None
+        hf_logging = None
+        hf_verbosity = None
+        hf_progress_disabled = None
+
+        try:
+            for name in logger_names:
+                logging.getLogger(name).setLevel(logging.ERROR)
+
+            try:
+                from transformers.utils import logging as transformers_logging
+
+                transformers_verbosity = transformers_logging.get_verbosity()
+                transformers_progress_enabled = transformers_logging.is_progress_bar_enabled()
+                transformers_logging.set_verbosity_error()
+                transformers_logging.disable_progress_bar()
+            except Exception:
+                transformers_logging = None
+
+            try:
+                from huggingface_hub.utils import (
+                    are_progress_bars_disabled,
+                    disable_progress_bars,
+                    enable_progress_bars,
+                )
+                from huggingface_hub.utils import logging as hf_logging
+
+                hf_verbosity = hf_logging.get_verbosity()
+                hf_progress_disabled = are_progress_bars_disabled()
+                hf_logging.set_verbosity_error()
+                if not hf_progress_disabled:
+                    disable_progress_bars()
+            except Exception:
+                hf_logging = None
+                disable_progress_bars = None
+                enable_progress_bars = None
+
+            yield
+        finally:
+            for name, level in original_logger_levels.items():
+                logging.getLogger(name).setLevel(level)
+
+            if transformers_logging is not None and transformers_verbosity is not None:
+                transformers_logging.set_verbosity(transformers_verbosity)
+                if transformers_progress_enabled:
+                    transformers_logging.enable_progress_bar()
+                else:
+                    transformers_logging.disable_progress_bar()
+
+            if hf_logging is not None and hf_verbosity is not None:
+                hf_logging.set_verbosity(hf_verbosity)
+                if hf_progress_disabled:
+                    disable_progress_bars()
+                else:
+                    enable_progress_bars()
+
     # ------------------------------------------------------------------
     # Lazy model access
     # ------------------------------------------------------------------
@@ -55,15 +128,17 @@ class EmbeddingGenerator:
     def model(self):
         """Load the SentenceTransformer model on first use."""
         if self._model is None:
+            logger.info("Loading embedding model: %s", self.model_name)
             try:
-                from sentence_transformers import SentenceTransformer
+                with self._quiet_model_load():
+                    from sentence_transformers import SentenceTransformer
+
+                    self._model = SentenceTransformer(self.model_name)
             except ImportError:
                 raise ImportError(
                     "sentence-transformers is not installed.\n"
                     "Run:  pip install sentence-transformers"
                 )
-            logger.info("Loading embedding model: %s", self.model_name)
-            self._model = SentenceTransformer(self.model_name)
             logger.info(
                 "Model loaded (embedding dim=%d)", self.embedding_dim
             )
