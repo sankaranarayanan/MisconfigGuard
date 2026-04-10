@@ -36,6 +36,10 @@ tmp/
 pytest-summary.txt
 pytest_full.log
 
+# Local Copilot customization artifacts
+.github/skills/
+.github/agents/
+
 # IDE and OS noise
 .DS_Store
 Thumbs.db
