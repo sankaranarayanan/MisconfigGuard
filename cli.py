@@ -29,22 +29,25 @@ from typing import Optional
 
 import yaml
 
+from misconfigguard.config import resolve_config_path
+
 
 # ------------------------------------------------------------------
 # Config loader
 # ------------------------------------------------------------------
 
 def load_config(config_path: str = "config.yaml") -> dict:
-    """Load YAML config, return empty dict if file is missing."""
+    """Load YAML config, falling back to the canonical config folder."""
+    resolved_path = resolve_config_path(config_path)
     try:
-        with open(config_path, "r") as fh:
+        with open(resolved_path, "r") as fh:
             cfg = yaml.safe_load(fh) or {}
-        logging.getLogger(__name__).debug("Loaded config from %s", config_path)
+        logging.getLogger(__name__).debug("Loaded config from %s", resolved_path)
         return cfg
     except FileNotFoundError:
         return {}
     except yaml.YAMLError as exc:
-        print(f"[WARN] Failed to parse config {config_path}: {exc}", file=sys.stderr)
+        print(f"[WARN] Failed to parse config {resolved_path}: {exc}", file=sys.stderr)
         return {}
 
 
@@ -276,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default="config.yaml",
         metavar="FILE",
-        help="Path to YAML config file (default: config.yaml)",
+        help="Path to YAML config file (default: config.yaml, fallback: config/config.yaml)",
     )
     parser.add_argument(
         "--log-level",

@@ -1,0 +1,55 @@
+{
+  "summary": {
+    "total": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "errors": 0,
+    "files_scanned": 8,
+    "scanned_files": [
+      "azure-pipelines.yml",
+      "config.yaml",
+      "policy.yaml",
+      "results.json",
+      "cache\\index_registry.json",
+      "config\\config.yaml",
+      "config\\policy.yaml",
+      ".github\\workflows\\security-scan.yml"
+    ]
+  },
+  "issues": [],
+  "metadata": {
+    "changed_files": [],
+    "detectors": [
+      "IAMSecurityAnalyzer",
+      "WorkloadIdentitySecurityAnalyzer",
+      "PromptInjectionAnalyzer",
+      "HardcodedSecretsAnalyzer"
+    ],
+    "errors": []
+  },
+  "policy": {
+    "status": "pass",
+    "violations": [],
+    "summary": {
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "details": [],
+    "policy": {
+      "fail_on": {
+        "high": true,
+        "medium": true,
+        "low": false
+      },
+      "max_allowed": {
+        "high": 0,
+        "medium": 2,
+        "low": 5
+      },
+      "path": "./policy.yaml",
+      "environment": "dev"
+    }
+  }
+}

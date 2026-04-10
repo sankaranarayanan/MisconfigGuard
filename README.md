@@ -15,6 +15,28 @@ This README is intentionally limited to the routed RAG flow:
 4. How to use the routed query API from Python.
 5. Which configuration controls the routing behavior.
 
+## Project Layout
+
+The repo now uses a layered layout without breaking the legacy root entry points:
+
+```text
+config/
+  config.yaml
+  policy.yaml
+tests/
+  test_suite.py
+misconfigguard/
+  analysis/
+  parsing/
+  rag/
+  scanning/
+  config/
+  models/
+  services/
+```
+
+The root-level files remain as compatibility shims for imports and CLI usage.
+
 ## Routed RAG Architecture
 
 ```text
@@ -271,21 +293,6 @@ The general RAG path does more than plain vector similarity search.
 | `rule_aware_retriever.py` | Resource-aware security rule retrieval |
 | `context_builder.py` | Prompt assembly for routed analysis |
 | `cli.py` | CLI entry points for scan and query |
-
-```bash
-python setup_dirs.py
-```
-
-This creates:
-
-```
-src/
-├── scanner/   file_scanner.py  git_ingestor.py
-├── parser/    file_parser.py
-├── rag/       chunker.py  embedding_generator.py  vector_store_manager.py
-├── llm/       local_llm_client.py
-└── pipeline/  rag_pipeline.py
-```
 
 ---
 

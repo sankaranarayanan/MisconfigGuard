@@ -1,0 +1,96 @@
+# MisconfigGuard — Configuration File
+
+ingestion:
+  supported_extensions: [".tf", ".yml", ".yaml", ".json"]
+  chunk_size: 800          # target tokens per chunk (word-level approximation, legacy Chunker)
+  chunk_overlap: 100       # overlap between consecutive chunks (legacy Chunker)
+  max_file_size_mb: 10     # skip files larger than this
+
+chunking:
+  strategy: "semantic"           # "semantic" (default) | "fixed" | "hybrid"
+  max_tokens_per_chunk: 500      # soft ceiling; semantic chunks split further in hybrid mode
+  overlap_tokens: 50             # token overlap when splitting oversized chunks
+  resolve_dependencies: true     # resolve cross-file refs; enable dependency expansion
+
+git:
+  clone_dir: "./tmp/repos"
+  depth: 1                 # shallow clone for speed
+
+embedding:
+  model: "sentence-transformers/all-MiniLM-L6-v2"  # fast; swap for BAAI/bge-large-en for higher accuracy
+  cache_dir: "./cache/embeddings"
+  batch_size: 32
+
+vector_store:
+  backend: "faiss"                     # "faiss" (default) or "chroma"
+  index_path: "./cache/faiss_index"
+  chroma_persist_dir: "./cache/chroma"
+  top_k: 5
+
+llm:
+  base_url: "http://localhost:11434"   # Ollama default
+  model: "llama3"                      # or "mistral"
+  timeout: 120
+  max_tokens: 2048
+
+retrieval:
+  top_k_code: 5              # code chunks retrieved per query
+  top_k_security: 3          # security rules retrieved per query
+  semantic_weight: 0.7       # weight for vector-similarity score
+  keyword_weight: 0.3        # weight for keyword (BM25) relevance score
+  cache_ttl: 300             # retrieval cache TTL in seconds (0 = disabled)
+  max_context_tokens: 3000   # max tokens in assembled prompt context
+
+query_routing:
+  enabled: true
+  use_llm_routing: true
+  routing_model: "llama3"
+  routing_max_tokens: 20
+  routing_cache_ttl: 300
+  log_intent: true
+
+rule_aware:
+  enabled: true              # filter security rules by matched resource metadata before LLM analysis
+  cache_ttl: 300             # cache filtered rule combinations for repeated queries
+  include_generic_rules: true
+
+iam:
+  max_roles_per_identity: 3  # flag identities exceeding this many role assignments
+  high_privilege_roles:      # roles always checked regardless of scope
+    - "Owner"
+    - "Contributor"
+    - "User Access Administrator"
+  use_llm: true              # enrich findings with LLM reasoning (requires Ollama)
+  top_k_code: 5
+  top_k_security: 3
+
+workload_identity:
+  use_llm: true              # enrich workload identity findings with LLM reasoning
+  top_k_code: 5
+  top_k_security: 3
+
+prompt_injection:
+  use_llm: true              # enrich prompt-injection findings with LLM validation when available
+  top_k_security: 3
+
+secrets:
+  use_llm: true              # enrich hardcoded secret findings with LLM reasoning
+  top_k_code: 5
+  top_k_security: 3
+  entropy_threshold: 4.5
+
+policy:
+  path: "./policy.yaml"      # default policy file used by scanner.py
+  environment: "dev"         # override with MISCONFIGGUARD_POLICY_ENV or --policy-env
+  fail_on:
+    high: true
+    medium: false
+    low: false
+  max_allowed:
+    high: 0
+    medium: 5
+    low: 10
+
+logging:
+  level: "INFO"
+  file: "./logs/misconfigguard.log"
