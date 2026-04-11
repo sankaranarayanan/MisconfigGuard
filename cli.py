@@ -112,8 +112,8 @@ def build_pipeline(cfg: dict):
         ),
         llm_client=LocalLLMClient(
             base_url=llm.get("base_url", "http://localhost:11434"),
-            model=llm.get("model", "llama3"),
-            timeout=llm.get("timeout", 120),
+            model=llm.get("model"),
+            timeout=llm.get("timeout", 600),
             max_tokens=llm.get("max_tokens", 2048),
         ),
         expand_dependencies=ck.get("resolve_dependencies", True),

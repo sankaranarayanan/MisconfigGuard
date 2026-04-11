@@ -1005,6 +1005,30 @@ class TestLocalLLMClient:
         client = LocalLLMClient(base_url="http://localhost:19999")
         assert client.is_available() is False
 
+    def test_defaults_to_configured_model(self, monkeypatch):
+        from local_llm_client import LocalLLMClient
+
+        monkeypatch.setattr(
+            "misconfigguard.rag.local_llm_client.load_llm_config",
+            lambda: {
+                "model": "configured-model",
+                "base_url": "http://localhost:11434",
+                "timeout": 600,
+                "max_tokens": 2048,
+            },
+        )
+
+        client = LocalLLMClient()
+
+        assert client.model == "configured-model"
+
+    def test_defaults_to_600_second_timeout(self):
+        from local_llm_client import LocalLLMClient
+
+        client = LocalLLMClient()
+
+        assert client.timeout == 600
+
     def test_analyze_security_builds_correct_prompt(self, monkeypatch):
         from local_llm_client import LocalLLMClient, _SECURITY_PROMPT_TEMPLATE
 
@@ -1021,6 +1045,26 @@ class TestLocalLLMClient:
         assert "code here" in captured["prompt"]
         assert "any secrets?" in captured["prompt"]
         assert result == "No security issues detected."
+
+
+class TestMainBuildPipeline:
+    def test_build_pipeline_uses_configured_ollama_base_url(self, tmp_path):
+        from main import build_pipeline
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "llm:\n"
+            "  base_url: http://ollama.internal:11434\n"
+            "  model: mistral\n"
+            "  timeout: 600\n",
+            encoding="utf-8",
+        )
+
+        pipeline = build_pipeline(config_path=str(config_path))
+
+        assert pipeline.llm_client.base_url == "http://ollama.internal:11434"
+        assert pipeline.llm_client.model == "mistral"
+        assert pipeline.llm_client.timeout == 600
 
 
 # ===========================================================================
@@ -4848,7 +4892,7 @@ def mock_rag_pipeline():
             self.query_routing_cfg = {
                 "enabled": True,
                 "use_llm_routing": True,
-                "routing_model": "llama3",
+                "routing_model": "configured-model",
                 "routing_max_tokens": 20,
                 "routing_cache_ttl": 300,
                 "log_intent": True,

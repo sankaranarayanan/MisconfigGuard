@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
@@ -29,3 +31,20 @@ def resolve_policy_path(policy_path: str | None = None) -> Path:
     if LEGACY_POLICY_PATH.exists():
         return LEGACY_POLICY_PATH
     return DEFAULT_POLICY_PATH
+
+
+def load_project_config(config_path: str | None = None) -> dict:
+    """Load the canonical project config file, returning an empty dict on failure."""
+    resolved_path = resolve_config_path(config_path)
+    try:
+        with open(resolved_path, "r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except (FileNotFoundError, yaml.YAMLError):
+        return {}
+
+
+def load_llm_config(config_path: str | None = None) -> dict:
+    """Return the configured LLM settings from project config."""
+    cfg = load_project_config(config_path)
+    llm_cfg = cfg.get("llm", {}) if isinstance(cfg, dict) else {}
+    return llm_cfg if isinstance(llm_cfg, dict) else {}

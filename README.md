@@ -90,7 +90,7 @@ python -m pip install -r requirements.txt
 If you want LLM-backed query routing and analysis, start Ollama:
 
 ```powershell
-ollama pull llama3
+ollama pull gemma4
 ollama serve
 ```
 
@@ -201,7 +201,7 @@ pipeline = RAGPipeline(
     chunker=Chunker(chunk_size=800, overlap=100),
     embedder=EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2"),
     vector_store=VectorStoreManager(backend="faiss"),
-    llm_client=LocalLLMClient(model="llama3"),
+    llm_client=LocalLLMClient(model="gemma4"),
     incremental=True,
     max_workers=4,
 )
@@ -239,7 +239,7 @@ The main routing controls are in `config.yaml`:
 query_routing:
   enabled: true
   use_llm_routing: true
-  routing_model: "llama3"
+  routing_model: "gemma4"
   routing_max_tokens: 20
   routing_cache_ttl: 300
   log_intent: true

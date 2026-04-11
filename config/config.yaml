@@ -29,8 +29,8 @@ vector_store:
 
 llm:
   base_url: "http://localhost:11434"   # Ollama default
-  model: "llama3"                      # or "mistral"
-  timeout: 120
+  model: "gemma4:e4b"                  # or "mistral"
+  timeout: 600
   max_tokens: 2048
 
 retrieval:
@@ -44,7 +44,7 @@ retrieval:
 query_routing:
   enabled: true
   use_llm_routing: true
-  routing_model: "llama3"
+  routing_model: "gemma4:e4b"
   routing_max_tokens: 20
   routing_cache_ttl: 300
   log_intent: true

@@ -15,6 +15,10 @@ import logging
 import sys
 from pathlib import Path
 
+import yaml
+
+from misconfigguard.config import resolve_config_path
+
 # ------------------------------------------------------------------
 # Logging — configure before importing pipeline modules so that their
 # module-level loggers inherit the root configuration.
@@ -42,11 +46,28 @@ from vector_store_manager import VectorStoreManager
 # Helper: build a default pipeline
 # ------------------------------------------------------------------
 
+def load_config(config_path: str = "config.yaml") -> dict:
+  """Load YAML config, falling back to the canonical config folder."""
+  resolved_path = resolve_config_path(config_path)
+  try:
+    with open(resolved_path, "r", encoding="utf-8") as fh:
+      return yaml.safe_load(fh) or {}
+  except FileNotFoundError:
+    return {}
+  except yaml.YAMLError as exc:
+    logger.warning("Failed to parse config %s: %s", resolved_path, exc)
+    return {}
+
 def build_pipeline(
     backend: str = "faiss",
-    llm_model: str = "llama3",
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+    config_path: str = "config.yaml",
 ) -> RAGPipeline:
     """Return a RAGPipeline wired with sensible defaults."""
+    cfg = load_config(config_path)
+    llm_cfg = cfg.get("llm", {})
+
     return RAGPipeline(
         scanner=FileScanner(max_file_size_mb=10),
         parser=FileParser(),
@@ -62,9 +83,9 @@ def build_pipeline(
             chroma_persist_dir="./cache/chroma",
         ),
         llm_client=LocalLLMClient(
-            base_url="http://localhost:11434",
-            model=llm_model,
-            timeout=120,
+            base_url=llm_base_url or llm_cfg.get("base_url", "http://localhost:11434"),
+          model=llm_model or llm_cfg.get("model"),
+            timeout=llm_cfg.get("timeout", 600),
         ),
     )
 

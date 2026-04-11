@@ -5,7 +5,7 @@ Ollama API reference:  https://github.com/ollama/ollama/blob/main/docs/api.md
 Default endpoint:      POST http://localhost:11434/api/generate
 
 Supported models (install with `ollama pull <model>`):
-    llama3      — general purpose, strong reasoning
+    Configure llm.model in config.yaml for the default runtime model
     mistral     — fast, good for structured output
     codellama   — optimised for code analysis
 """
@@ -15,6 +15,8 @@ import logging
 from typing import Iterator, Optional
 
 import requests
+
+from misconfigguard.config import load_llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,10 @@ class LocalLLMClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:11434",
-        model: str = "llama3",
-        timeout: int = 120,
-        max_tokens: int = 2048,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: Optional[int] = None,
+        max_tokens: Optional[int] = None,
     ):
         """
         Args:
@@ -69,10 +71,12 @@ class LocalLLMClient:
             timeout:    HTTP request timeout in seconds.
             max_tokens: Maximum tokens in the generated response.
         """
-        self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.timeout = timeout
-        self.max_tokens = max_tokens
+        llm_cfg = load_llm_config()
+
+        self.base_url = (base_url or llm_cfg.get("base_url") or "http://localhost:11434").rstrip("/")
+        self.model = model or llm_cfg.get("model") or ""
+        self.timeout = timeout if timeout is not None else llm_cfg.get("timeout", 600)
+        self.max_tokens = max_tokens if max_tokens is not None else llm_cfg.get("max_tokens", 2048)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -203,7 +207,7 @@ class LocalLLMClient:
             for token in self.stream_generate(prompt):
                 print(token, end="", flush=True)
                 parts.append(token)
-            print()  # newline after streaming
+            print()
             return "".join(parts)
 
         return self.generate(prompt)

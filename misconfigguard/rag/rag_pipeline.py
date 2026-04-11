@@ -166,7 +166,7 @@ class RAGPipeline:
         self.query_routing_cfg = {
             "enabled": True,
             "use_llm_routing": True,
-            "routing_model": getattr(self.llm_client, "model", "llama3"),
+            "routing_model": getattr(self.llm_client, "model", None),
             "routing_max_tokens": 20,
             "routing_cache_ttl": 300,
             "log_intent": True,
