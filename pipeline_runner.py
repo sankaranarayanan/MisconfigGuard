@@ -48,6 +48,7 @@ class PipelineRunner:
 
         summary = {
             "total": len(issues),
+            "critical": sum(1 for issue in issues if issue.get("severity") == "CRITICAL"),
             "high": sum(1 for issue in issues if issue.get("severity") == "HIGH"),
             "medium": sum(1 for issue in issues if issue.get("severity") == "MEDIUM"),
             "low": sum(1 for issue in issues if issue.get("severity") == "LOW"),
@@ -183,4 +184,4 @@ class PipelineRunner:
 
     @staticmethod
     def _severity_rank(severity: str) -> int:
-        return {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get((severity or "LOW").upper(), 9)
+        return {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}.get((severity or "LOW").upper(), 9)

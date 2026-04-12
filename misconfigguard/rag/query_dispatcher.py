@@ -39,8 +39,10 @@ class QueryDispatcher:
             self._hybrid_retriever = HybridRetriever(
                 vector_store=rag_pipeline.vector_store,
                 embedder=rag_pipeline.embedder,
+                rerank_embedder=getattr(rag_pipeline, "rerank_embedder", None),
                 semantic_weight=self._retrieval_cfg.get("semantic_weight", 0.7),
                 keyword_weight=self._retrieval_cfg.get("keyword_weight", 0.3),
+                rerank_top_k=self._retrieval_cfg.get("rerank_top_k"),
             )
         self._security_kb = None
         self.rule_aware_retriever = rule_aware_retriever

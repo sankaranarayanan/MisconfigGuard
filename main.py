@@ -67,26 +67,36 @@ def build_pipeline(
     """Return a RAGPipeline wired with sensible defaults."""
     cfg = load_config(config_path)
     llm_cfg = cfg.get("llm", {})
+    retrieval_cfg = cfg.get("retrieval", {})
 
     return RAGPipeline(
         scanner=FileScanner(max_file_size_mb=10),
         parser=FileParser(),
-        chunker=Chunker(chunk_size=800, overlap=100),
+      chunker=Chunker(chunk_size=1500, overlap=100),
         embedder=EmbeddingGenerator(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
             cache_dir="./cache/embeddings",
-            batch_size=32,
+        batch_size=64,
+        ),
+        rerank_embedder=EmbeddingGenerator(
+          model_name=retrieval_cfg.get("rerank_model", "BAAI/bge-large-en"),
+          cache_dir="./cache/embeddings",
+          batch_size=64,
         ),
         vector_store=VectorStoreManager(
             backend=backend,
             index_path="./cache/faiss_index",
             chroma_persist_dir="./cache/chroma",
+        keep_full_db_in_ram=True,
         ),
         llm_client=LocalLLMClient(
             base_url=llm_base_url or llm_cfg.get("base_url", "http://localhost:11434"),
-          model=llm_model or llm_cfg.get("model"),
+        model=llm_model or llm_cfg.get("model"),
             timeout=llm_cfg.get("timeout", 600),
+        stream=llm_cfg.get("stream", False),
         ),
+      batch_embed_size=64,
+      retrieval_cfg={"parallel_workers": 8, "rerank_model": retrieval_cfg.get("rerank_model", "BAAI/bge-large-en"), "rerank_top_k": retrieval_cfg.get("rerank_top_k", 20)},
     )
 
 

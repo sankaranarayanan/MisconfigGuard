@@ -2,14 +2,14 @@
 
 ingestion:
   supported_extensions: [".tf", ".yml", ".yaml", ".json"]
-  chunk_size: 800          # target tokens per chunk (word-level approximation, legacy Chunker)
+  chunk_size: 1500         # target tokens per chunk (word-level approximation, legacy Chunker)
   chunk_overlap: 100       # overlap between consecutive chunks (legacy Chunker)
   max_file_size_mb: 10     # skip files larger than this
 
 chunking:
-  strategy: "semantic"           # "semantic" (default) | "fixed" | "hybrid"
-  max_tokens_per_chunk: 500      # soft ceiling; semantic chunks split further in hybrid mode
-  overlap_tokens: 50             # token overlap when splitting oversized chunks
+  strategy: "hybrid"           # "semantic" (default) | "fixed" | "hybrid"
+  max_tokens_per_chunk: 1200     # soft ceiling; semantic chunks split further in hybrid mode
+  overlap_tokens: 100             # token overlap when splitting oversized chunks
   resolve_dependencies: true     # resolve cross-file refs; enable dependency expansion
 
 git:
@@ -17,34 +17,39 @@ git:
   depth: 1                 # shallow clone for speed
 
 embedding:
-  model: "sentence-transformers/all-MiniLM-L6-v2"  # fast; swap for BAAI/bge-large-en for higher accuracy
+  model: "sentence-transformers/all-MiniLM-L6-v2"  # fast index model for initial retrieval
   cache_dir: "./cache/embeddings"
-  batch_size: 32
+  batch_size: 256
 
 vector_store:
   backend: "faiss"                     # "faiss" (default) or "chroma"
   index_path: "./cache/faiss_index"
   chroma_persist_dir: "./cache/chroma"
-  top_k: 5
+  top_k: 20
+  keep_full_db_in_ram: true
 
 llm:
   base_url: "http://localhost:11434"   # Ollama default
-  model: "gemma4:e4b"                  # or "mistral"
-  timeout: 600
-  max_tokens: 2048
+  model: "llama3.1"                  # or "mistral"
+  timeout: 1600
+  max_tokens: 4096
+  stream: false
 
 retrieval:
-  top_k_code: 5              # code chunks retrieved per query
-  top_k_security: 3          # security rules retrieved per query
+  top_k_code: 15             # code chunks retrieved per query
+  top_k_security: 5          # security rules retrieved per query
   semantic_weight: 0.7       # weight for vector-similarity score
-  keyword_weight: 0.3        # weight for keyword (BM25) relevance score
-  cache_ttl: 300             # retrieval cache TTL in seconds (0 = disabled)
-  max_context_tokens: 3000   # max tokens in assembled prompt context
+  keyword_weight: 0.35        # weight for keyword (BM25) relevance score
+  rerank_model: "BAAI/bge-large-en"  # higher-accuracy model used to rerank retrieved candidates
+  rerank_top_k: 20           # number of merged candidates reranked before trimming to top_k_code
+  cache_ttl: 600             # retrieval cache TTL in seconds (0 = disabled)
+  max_context_tokens: 12000   # max tokens in assembled prompt context
+  parallel_workers: 8
 
 query_routing:
   enabled: true
   use_llm_routing: true
-  routing_model: "gemma4:e4b"
+  routing_model: "llama3.1"
   routing_max_tokens: 20
   routing_cache_ttl: 300
   log_intent: true
@@ -61,22 +66,22 @@ iam:
     - "Contributor"
     - "User Access Administrator"
   use_llm: true              # enrich findings with LLM reasoning (requires Ollama)
-  top_k_code: 5
-  top_k_security: 3
+  top_k_code: 15
+  top_k_security: 5
 
 workload_identity:
   use_llm: true              # enrich workload identity findings with LLM reasoning
-  top_k_code: 5
-  top_k_security: 3
+  top_k_code: 15
+  top_k_security: 5
 
 prompt_injection:
   use_llm: true              # enrich prompt-injection findings with LLM validation when available
-  top_k_security: 3
+  top_k_security: 5
 
 secrets:
   use_llm: true              # enrich hardcoded secret findings with LLM reasoning
-  top_k_code: 5
-  top_k_security: 3
+  top_k_code: 15
+  top_k_security: 5
   entropy_threshold: 4.5
 
 policy:

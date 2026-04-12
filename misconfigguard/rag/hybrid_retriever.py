@@ -75,16 +75,20 @@ class RetrievalResult:
     chunk         : dict  = field(compare=False)
     semantic_score: float = field(compare=False, default=0.0)
     keyword_score : float = field(compare=False, default=0.0)
+    rerank_score  : Optional[float] = field(compare=False, default=None)
     rank          : int   = field(compare=False, default=0)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "chunk":          self.chunk,
             "final_score":    round(self.final_score,    4),
             "semantic_score": round(self.semantic_score, 4),
             "keyword_score":  round(self.keyword_score,  4),
             "rank":           self.rank,
         }
+        if self.rerank_score is not None:
+            result["rerank_score"] = round(self.rerank_score, 4)
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +121,8 @@ class HybridRetriever:
         embedder:     Any,
         semantic_weight: float = 0.7,
         keyword_weight:  float = 0.3,
+        rerank_embedder: Optional[Any] = None,
+        rerank_top_k:    Optional[int] = None,
         max_workers:     int   = 2,
     ) -> None:
         if not (0.0 <= semantic_weight <= 1.0 and 0.0 <= keyword_weight <= 1.0):
@@ -124,12 +130,15 @@ class HybridRetriever:
 
         self.vector_store    = vector_store
         self.embedder        = embedder
+        self.rerank_embedder = rerank_embedder
+        self.rerank_top_k    = rerank_top_k
         self.semantic_weight = semantic_weight
         self.keyword_weight  = keyword_weight
         self.max_workers     = max_workers
 
         self._keyword_engine = KeywordSearchEngine()
         self._keyword_synced_count = -1  # tracks when keyword index was last built
+        self._keyword_synced_next_id = -1
 
     # ------------------------------------------------------------------
     # Keyword index synchronisation
@@ -141,19 +150,38 @@ class HybridRetriever:
         has grown (new chunks ingested) since the last build.
         """
         total = self.vector_store.total_vectors
-        if total == self._keyword_synced_count:
+        next_id = self._current_next_faiss_id()
+        if (
+            total == self._keyword_synced_count
+            and next_id == self._keyword_synced_next_id
+        ):
             return  # already up to date
         if total == 0:
             # Nothing to index; mark as synced so we don't retry every call.
             self._keyword_synced_count = 0
+            self._keyword_synced_next_id = next_id
             return
 
         chunks = self._load_all_chunks()
         self._keyword_engine.index(chunks)
         self._keyword_synced_count = total
+        self._keyword_synced_next_id = next_id
         logger.debug(
             "HybridRetriever: keyword index synced with %d chunks", total
         )
+
+    def _current_next_faiss_id(self) -> int:
+        """
+        Return a monotonically increasing marker for metadata changes.
+
+        For FAISS-backed stores, ``next_faiss_id`` changes whenever vectors are
+        added or replaced (delete+add), even if total vector count is unchanged.
+        """
+        try:
+            return int(self.vector_store.metadata_store.next_faiss_id())
+        except Exception:
+            # Non-FAISS or test doubles may not expose metadata_store.
+            return self.vector_store.total_vectors
 
     def _load_all_chunks(self) -> List[dict]:
         """Fetch all chunk dicts from the vector store's metadata store."""
@@ -173,6 +201,7 @@ class HybridRetriever:
         Returns the number of chunks indexed.
         """
         self._keyword_synced_count = -1
+        self._keyword_synced_next_id = -1
         self._sync_keyword_index_if_needed()
         return self._keyword_engine.total_indexed
 
@@ -241,6 +270,8 @@ class HybridRetriever:
 
         # Sort by final score descending, assign ranks, trim to top_k.
         ranked = sorted(merged.values(), key=lambda r: r.final_score, reverse=True)
+        if self.rerank_embedder is not None and ranked:
+            ranked = self._rerank(query, ranked, top_k=top_k, fetch_k=fetch_k)
         for idx, res in enumerate(ranked[:top_k], start=1):
             res.rank = idx
 
@@ -254,6 +285,53 @@ class HybridRetriever:
         """Embed a text query and return a 1-D numpy array."""
         vecs = self.embedder.embed([query])
         return np.asarray(vecs[0], dtype=np.float32)
+
+    def _rerank(
+        self,
+        query: str,
+        ranked: List[RetrievalResult],
+        top_k: int,
+        fetch_k: int,
+    ) -> List[RetrievalResult]:
+        candidate_limit = min(
+            len(ranked),
+            max(top_k, self.rerank_top_k or fetch_k),
+        )
+        if candidate_limit <= 0:
+            return ranked
+
+        prefix = ranked[:candidate_limit]
+        suffix = ranked[candidate_limit:]
+        texts = [query] + [result.chunk.get("text", "") for result in prefix]
+        embeddings = np.asarray(self.rerank_embedder.embed(texts), dtype=np.float32)
+        query_vec = embeddings[0]
+        doc_vecs = embeddings[1:]
+
+        query_norm = float(np.linalg.norm(query_vec)) or 1e-10
+        doc_norms = np.linalg.norm(doc_vecs, axis=1)
+        doc_norms = np.where(doc_norms == 0, 1e-10, doc_norms)
+        similarities = np.dot(doc_vecs, query_vec) / (doc_norms * query_norm)
+
+        base_scores = {id(result): result.final_score for result in prefix}
+        for result, similarity in zip(prefix, similarities):
+            rerank_score = float((float(similarity) + 1.0) / 2.0)
+            result.rerank_score = rerank_score
+            result.final_score = rerank_score
+
+        prefix = sorted(
+            prefix,
+            key=lambda result: (
+                result.rerank_score if result.rerank_score is not None else -1.0,
+                base_scores[id(result)],
+            ),
+            reverse=True,
+        )
+        logger.debug(
+            "HybridRetriever reranked %d candidate(s) with %s",
+            candidate_limit,
+            getattr(self.rerank_embedder, "model_name", type(self.rerank_embedder).__name__),
+        )
+        return prefix + suffix
 
     def _semantic_search(
         self,
@@ -352,6 +430,7 @@ class HybridRetriever:
         """
         self._keyword_engine.index(chunks)
         self._keyword_synced_count = len(chunks)
+        self._keyword_synced_next_id = -1
 
     # ------------------------------------------------------------------
     # Properties

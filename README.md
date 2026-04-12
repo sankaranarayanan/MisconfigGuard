@@ -203,7 +203,7 @@ pipeline = RAGPipeline(
     vector_store=VectorStoreManager(backend="faiss"),
     llm_client=LocalLLMClient(model="gemma4"),
     incremental=True,
-    max_workers=4,
+    max_workers=8,
 )
 
 pipeline.ingest_directory("./terraform-project")

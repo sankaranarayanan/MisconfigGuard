@@ -336,6 +336,62 @@ class TestEmbeddingGenerator:
 
         np.testing.assert_array_equal(first, second)
 
+    def test_cache_isolated_by_model_name(self, tmp_path):
+        from embedding_generator import EmbeddingGenerator
+
+        cache_dir = tmp_path / "emb_cache"
+        text = "same text across models"
+
+        class SmallModel:
+            def encode(self, texts, **kwargs):
+                return np.ones((len(texts), 384), dtype=np.float32)
+
+            def get_sentence_embedding_dimension(self):
+                return 384
+
+        class LargeModel:
+            def __init__(self):
+                self.calls = 0
+
+            def encode(self, texts, **kwargs):
+                self.calls += 1
+                return np.full((len(texts), 1024), 2.0, dtype=np.float32)
+
+            def get_sentence_embedding_dimension(self):
+                return 1024
+
+        first = EmbeddingGenerator(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            cache_dir=str(cache_dir),
+        )
+        first._model = SmallModel()
+        cached = first.embed([text])
+        assert cached.shape == (1, 384)
+
+        second = EmbeddingGenerator(
+            model_name="BAAI/bge-large-en",
+            cache_dir=str(cache_dir),
+        )
+        large_model = LargeModel()
+        second._model = large_model
+
+        fresh = second.embed([text])
+
+        assert large_model.calls == 1
+        assert fresh.shape == (1, 1024)
+        assert np.all(fresh == 2.0)
+
+    def test_embed_logs_batch_summary(self, tmp_path, caplog):
+        gen, _ = self._make_generator(tmp_path)
+
+        with caplog.at_level(logging.INFO, logger="misconfigguard.rag.embedding_generator"):
+            gen.embed(["doc one", "doc two"])
+
+        assert "Embedding batch" in caplog.text
+        assert "total_texts=2" in caplog.text
+        assert "cached=0" in caplog.text
+        assert "new=2" in caplog.text
+
     def test_model_load_quiets_third_party_logs(self, tmp_path, monkeypatch):
         from embedding_generator import EmbeddingGenerator
 
@@ -514,6 +570,43 @@ class TestVectorStoreManagerFAISS:
         loaded = store2.load()
         assert loaded
         assert store2.total_vectors == 3
+
+    def test_can_keep_full_db_in_ram(self, tmp_path):
+        from vector_store_manager import VectorStoreManager
+
+        store = VectorStoreManager(
+            backend="faiss",
+            index_path=str(tmp_path / "idx"),
+            keep_full_db_in_ram=True,
+        )
+
+        assert store.keep_full_db_in_ram is True
+
+    def test_ram_metadata_cache_serves_and_refreshes_lookups(self, tmp_path):
+        from vector_store_manager import VectorStoreManager
+
+        store = VectorStoreManager(
+            backend="faiss",
+            index_path=str(tmp_path / "idx"),
+            keep_full_db_in_ram=True,
+        )
+        embeddings, chunks = self._random_chunks(2, dim=8)
+
+        store.add(embeddings, chunks)
+
+        assert len(store._meta._cached_rows) == 2
+        first_row = store._meta._cached_rows[0]
+        assert store._meta.get(first_row["chunk_id"])["file_path"] == first_row["file_path"]
+        assert store._meta.get_by_faiss_id(first_row["faiss_id"])["chunk_id"] == first_row["chunk_id"]
+        assert store._meta.content_hash_exists(first_row["content_hash"]) is True
+        assert store._meta.chunk_id_for_hash(first_row["content_hash"]) == first_row["chunk_id"]
+
+        removed = store.delete_file(first_row["file_path"])
+
+        assert removed == 1
+        assert store._meta.get(first_row["chunk_id"]) is None
+        assert store._meta.content_hash_exists(first_row["content_hash"]) is False
+        assert store._meta.total == 1
 
 
 # ===========================================================================
@@ -1022,12 +1115,40 @@ class TestLocalLLMClient:
 
         assert client.model == "configured-model"
 
-    def test_defaults_to_600_second_timeout(self):
+    def test_defaults_to_configured_timeout(self, monkeypatch):
         from local_llm_client import LocalLLMClient
+
+        monkeypatch.setattr(
+            "misconfigguard.rag.local_llm_client.load_llm_config",
+            lambda: {
+                "model": "configured-model",
+                "base_url": "http://localhost:11434",
+                "timeout": 1600,
+                "max_tokens": 2048,
+            },
+        )
 
         client = LocalLLMClient()
 
-        assert client.timeout == 600
+        assert client.timeout == 1600
+
+    def test_defaults_to_configured_stream(self, monkeypatch):
+        from local_llm_client import LocalLLMClient
+
+        monkeypatch.setattr(
+            "misconfigguard.rag.local_llm_client.load_llm_config",
+            lambda: {
+                "model": "configured-model",
+                "base_url": "http://localhost:11434",
+                "timeout": 600,
+                "max_tokens": 2048,
+                "stream": True,
+            },
+        )
+
+        client = LocalLLMClient()
+
+        assert client.stream is True
 
     def test_analyze_security_builds_correct_prompt(self, monkeypatch):
         from local_llm_client import LocalLLMClient, _SECURITY_PROMPT_TEMPLATE
@@ -1065,6 +1186,39 @@ class TestMainBuildPipeline:
         assert pipeline.llm_client.base_url == "http://ollama.internal:11434"
         assert pipeline.llm_client.model == "mistral"
         assert pipeline.llm_client.timeout == 600
+        assert pipeline.llm_client.stream is False
+
+
+class TestCLIBuildPipeline:
+    def test_build_pipeline_uses_configured_parallel_workers(self):
+        from cli import build_pipeline
+
+        pipeline = build_pipeline({"retrieval": {"parallel_workers": 8}})
+
+        assert pipeline.max_workers == 8
+
+    def test_build_pipeline_configures_rerank_embedder(self):
+        from cli import build_pipeline
+
+        pipeline = build_pipeline(
+            {
+                "embedding": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+                "retrieval": {"rerank_model": "BAAI/bge-large-en"},
+            }
+        )
+
+        assert pipeline.embedder.model_name == "sentence-transformers/all-MiniLM-L6-v2"
+        assert pipeline.rerank_embedder is not None
+        assert pipeline.rerank_embedder.model_name == "BAAI/bge-large-en"
+
+
+class TestRAGPipelineDefaults:
+    def test_default_max_workers_is_8(self):
+        from rag_pipeline import RAGPipeline
+
+        pipeline = RAGPipeline()
+
+        assert pipeline.max_workers == 8
 
 
 # ===========================================================================
@@ -1078,7 +1232,7 @@ class TestRAGPipeline:
     def _skip_without_faiss(self):
         pytest.importorskip("faiss")
 
-    def _build_pipeline(self, tmp_path, registry_path=None):
+    def _build_pipeline(self, tmp_path, registry_path=None, dim=8):
         from chunker import Chunker
         from embedding_generator import EmbeddingGenerator
         from file_parser import FileParser
@@ -1087,10 +1241,8 @@ class TestRAGPipeline:
         from rag_pipeline import RAGPipeline
         from vector_store_manager import VectorStoreManager
 
-        dim = 8
-
         # Stub embedder
-        embedder = EmbeddingGenerator(cache_dir=str(tmp_path / "emb"))
+        embedder = EmbeddingGenerator(cache_dir=str(tmp_path / f"emb_{dim}"))
 
         class FakeModel:
             def encode(self, texts, **kwargs):
@@ -1165,6 +1317,28 @@ class TestRAGPipeline:
 
         assert second_total > 0
         assert pipeline2.total_indexed > 0
+
+    def test_rebuilds_when_persisted_index_dimension_mismatches_embedder(self, tmp_path):
+        registry_path = str(tmp_path / "registry.json")
+        scan_dir = tmp_path / "scan_target"
+        scan_dir.mkdir()
+
+        target = scan_dir / "infra.tf"
+        target.write_text('resource "aws_s3_bucket" "b" { acl = "public-read" }')
+
+        first_pipeline = self._build_pipeline(tmp_path, registry_path=registry_path, dim=8)
+        first_total = first_pipeline.ingest_directory(str(scan_dir))
+
+        assert first_total > 0
+        assert first_pipeline.vector_store.embedding_dim == 8
+
+        second_pipeline = self._build_pipeline(tmp_path, registry_path=registry_path, dim=16)
+
+        second_total = second_pipeline.ingest_directory(str(scan_dir))
+
+        assert second_total > 0
+        assert second_pipeline.vector_store.embedding_dim == 16
+        assert second_pipeline.total_indexed > 0
 
     def test_analyze_empty_store_returns_helpful_message(self, tmp_path):
         pipeline = self._build_pipeline(tmp_path)
@@ -2059,6 +2233,19 @@ class TestSecurityKnowledgeBase:
         assert "severity" in d
         assert "score" in d
 
+    def test_add_rules_with_empty_list_is_noop(self, tmp_path):
+        from security_kb import SecurityKnowledgeBase
+
+        kb = SecurityKnowledgeBase(
+            embedder=self._make_embedder(dim=8),
+            index_path=str(tmp_path / "kb_noop"),
+        )
+        initial = kb.build()
+        added = kb.add_rules([])
+
+        assert added == 0
+        assert kb.total_rules == initial
+
 
 # ===========================================================================
 # HybridRetriever
@@ -2187,6 +2374,60 @@ class TestHybridRetriever:
             assert "keyword_score" in d
             assert "rank" in d
 
+    def test_keyword_index_resyncs_after_update_with_same_vector_count(self, tmp_path):
+        from hybrid_retriever import HybridRetriever
+
+        embedder, vs = self._make_components(tmp_path)
+        original_chunks = [
+            {
+                "chunk_id": "c1",
+                "text": "alpha legacy token",
+                "file_path": "main.tf",
+                "file_type": "terraform",
+                "chunk_index": 0,
+                "tokens": 3,
+                "dependencies": [],
+                "metadata": {},
+            },
+            {
+                "chunk_id": "c2",
+                "text": "stable chunk",
+                "file_path": "main.tf",
+                "file_type": "terraform",
+                "chunk_index": 1,
+                "tokens": 2,
+                "dependencies": [],
+                "metadata": {},
+            },
+        ]
+        self._populate_store(vs, embedder, original_chunks)
+
+        retriever = HybridRetriever(vector_store=vs, embedder=embedder)
+        retriever.retrieve("alpha", top_k=2)
+
+        replacement_chunk = {
+            "chunk_id": "c1",
+            "text": "bravo fresh token",
+            "file_path": "main.tf",
+            "file_type": "terraform",
+            "chunk_index": 0,
+            "tokens": 3,
+            "dependencies": [],
+            "metadata": {},
+        }
+        vs.update_embeddings(
+            chunk_ids=["c1"],
+            embeddings=embedder.embed([replacement_chunk["text"]]),
+            new_chunks=[replacement_chunk],
+        )
+
+        retriever.retrieve("bravo", top_k=2)
+
+        assert any(
+            "bravo fresh token" in chunk.get("text", "")
+            for chunk in retriever.keyword_engine._chunks
+        )
+
     def test_weights_must_be_in_range(self, tmp_path):
         from hybrid_retriever import HybridRetriever
 
@@ -2202,6 +2443,66 @@ class TestHybridRetriever:
         retriever = HybridRetriever(vector_store=vs, embedder=embedder)
         results = retriever.retrieve("anything", top_k=5)
         assert results == []
+
+    def test_rerank_embedder_reorders_candidates(self, monkeypatch):
+        from hybrid_retriever import HybridRetriever
+
+        class DummyVectorStore:
+            total_vectors = 2
+
+        class QueryEmbedder:
+            def embed(self, texts, **kwargs):
+                return np.array([[1.0, 0.0] for _ in texts], dtype=np.float32)
+
+        class RerankEmbedder:
+            def embed(self, texts, **kwargs):
+                mapping = {
+                    "secure query": np.array([1.0, 0.0], dtype=np.float32),
+                    "candidate one": np.array([0.0, 1.0], dtype=np.float32),
+                    "candidate two": np.array([1.0, 0.0], dtype=np.float32),
+                }
+                return np.vstack([mapping[text] for text in texts])
+
+        candidate_one = {
+            "chunk_id": "c1",
+            "text": "candidate one",
+            "file_path": "main.tf",
+            "file_type": "terraform",
+            "chunk_index": 0,
+            "metadata": {},
+        }
+        candidate_two = {
+            "chunk_id": "c2",
+            "text": "candidate two",
+            "file_path": "main.tf",
+            "file_type": "terraform",
+            "chunk_index": 1,
+            "metadata": {},
+        }
+
+        retriever = HybridRetriever(
+            vector_store=DummyVectorStore(),
+            embedder=QueryEmbedder(),
+            rerank_embedder=RerankEmbedder(),
+            rerank_top_k=2,
+        )
+
+        monkeypatch.setattr(retriever, "_sync_keyword_index_if_needed", lambda: None)
+        monkeypatch.setattr(
+            retriever,
+            "_semantic_search",
+            lambda query_embedding, top_k, metadata_filter: [
+                (candidate_one, 0.95),
+                (candidate_two, 0.80),
+            ],
+        )
+        monkeypatch.setattr(retriever, "_keyword_search", lambda query, top_k: [])
+
+        results = retriever.retrieve("secure query", top_k=2)
+
+        assert [result.chunk["chunk_id"] for result in results] == ["c2", "c1"]
+        assert results[0].rerank_score is not None
+        assert results[0].rerank_score > results[1].rerank_score
 
 
 # ===========================================================================
@@ -2530,6 +2831,16 @@ class TestRAGOrchestrator:
         assert orchestrator is not None
         assert orchestrator.retriever is not None
         assert orchestrator.prompt_builder is not None
+
+    def test_from_pipeline_uses_configured_retrieval_workers(self, tmp_path):
+        from rag_orchestrator import RAGOrchestrator
+
+        pipeline = self._make_pipeline(tmp_path)
+        pipeline.retrieval_cfg = {"parallel_workers": 4}
+
+        orchestrator = RAGOrchestrator.from_pipeline(pipeline)
+
+        assert orchestrator.retriever.max_workers == 4
 
     def test_structured_output_fallback_on_malformed_json(self, tmp_path):
         from hybrid_retriever import HybridRetriever
@@ -4047,6 +4358,28 @@ class TestPipelineRunner:
         assert result["summary"]["errors"] == 1
         assert len(result["metadata"]["errors"]) == 1
 
+    def test_counts_critical_findings_in_summary(self, tmp_path):
+        from pipeline_runner import PipelineRunner
+
+        target = tmp_path / "critical.tf"
+        target.write_text('resource "aws_s3_bucket" "x" {}')
+
+        critical = _StubAnalyzer({
+            "critical.tf": [
+                {
+                    "severity": "CRITICAL",
+                    "issue": "Public bucket with secrets",
+                    "file_path": str(target),
+                    "rule_id": "AWS-CRIT-001",
+                }
+            ]
+        })
+
+        result = PipelineRunner(analyzers=[critical]).run(str(tmp_path))
+
+        assert result["summary"]["total"] == 1
+        assert result["summary"]["critical"] == 1
+
 
 class TestScannerExitBehavior:
     def test_main_returns_nonzero_when_analyzer_errors_occur(self, monkeypatch, tmp_path):
@@ -4219,6 +4552,17 @@ class TestPolicyEvaluator:
 
         assert evaluated["status"] == "pass"
         assert evaluated["violations"] == []
+
+    def test_fails_when_critical_issues_exist(self):
+        from policy_evaluator import PolicyEvaluator
+
+        result = {"summary": {"critical": 1, "high": 0, "medium": 0, "low": 0}, "issues": []}
+        policy = {"fail_on": {"high": True, "medium": False, "low": False}, "max_allowed": {"high": 0, "medium": 5, "low": 10}}
+
+        evaluated = PolicyEvaluator().evaluate(result, policy)
+
+        assert evaluated["status"] == "fail"
+        assert any("CRITICAL" in violation for violation in evaluated["violations"])
 
 
 class TestPolicyEngine:
@@ -4649,6 +4993,45 @@ class TestRuleRepositoryAndFilter:
         )
 
         assert {rule["rule_id"] for rule in filtered} == {"az-storage-exact", "az-storage-generic"}
+
+    def test_filter_cache_updates_when_rule_set_changes(self):
+        from rule_filter import RuleFilter
+
+        filterer = RuleFilter()
+        rules_v1 = [
+            {
+                "rule_id": "az-storage-exact",
+                "resource_type": "azurerm_storage_account",
+                "cloud_provider": "azure",
+                "category": "storage",
+                "severity": "HIGH",
+            }
+        ]
+        first = filterer.filter_rules(
+            rules=rules_v1,
+            resource_types=["azurerm_storage_account"],
+            cloud_provider="azure",
+            category="storage",
+        )
+        assert {rule["rule_id"] for rule in first} == {"az-storage-exact"}
+
+        rules_v2 = rules_v1 + [
+            {
+                "rule_id": "az-storage-generic",
+                "resource_type": "storage",
+                "cloud_provider": "azure",
+                "category": "storage",
+                "severity": "MEDIUM",
+            }
+        ]
+        second = filterer.filter_rules(
+            rules=rules_v2,
+            resource_types=["azurerm_storage_account"],
+            cloud_provider="azure",
+            category="storage",
+        )
+
+        assert {rule["rule_id"] for rule in second} == {"az-storage-exact", "az-storage-generic"}
 
 
 class TestSecurityKnowledgeBaseRuleAware:

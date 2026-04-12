@@ -1040,6 +1040,9 @@ class SecurityKnowledgeBase:
         """
         from rule_repository import RuleRepository
 
+        if not rules:
+            return 0
+
         normalized_rules = RuleRepository(extra_rules=rules).list_rules()[-len(rules):]
         texts = [self._rule_to_text(r) for r in normalized_rules]
         embeddings = self._embedder.embed(texts)

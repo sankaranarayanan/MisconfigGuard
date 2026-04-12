@@ -120,10 +120,11 @@ class RAGPipeline:
         parser: Optional[FileParser] = None,
         chunker=None,
         embedder: Optional[EmbeddingGenerator] = None,
+        rerank_embedder: Optional[EmbeddingGenerator] = None,
         vector_store: Optional[VectorStoreManager] = None,
         llm_client: Optional[LocalLLMClient] = None,
         batch_embed_size: int = 64,
-        max_workers: int = 4,
+        max_workers: int = 8,
         incremental: bool = True,
         registry_path: str = "./cache/index_registry.json",
         expand_dependencies: bool = False,
@@ -155,6 +156,7 @@ class RAGPipeline:
         self.parser = parser or FileParser()
         self.chunker = chunker or IntelligentChunker()
         self.embedder = embedder or EmbeddingGenerator()
+        self.rerank_embedder = rerank_embedder
         self.vector_store = vector_store or VectorStoreManager()
         self.llm_client = llm_client or LocalLLMClient()
         self.resource_tagger = ResourceTagger()
@@ -195,7 +197,7 @@ class RAGPipeline:
             return
         if self.vector_store.total_vectors > 0:
             return
-        if self.vector_store.load():
+        if self.vector_store.load(expected_dim=self.embedder.embedding_dim):
             return
         if self._registry.has_entries() or self.vector_store.has_persisted_state():
             logger.warning(

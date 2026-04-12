@@ -186,11 +186,30 @@ class MetadataStore:
         CREATE INDEX IF NOT EXISTS idx_faiss_id     ON chunks(faiss_id);
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, keep_in_ram: bool = False) -> None:
         self._db_path = db_path
+        self._keep_in_ram = keep_in_ram
+        self._rows_by_chunk_id: Dict[str, Dict] = {}
+        self._rows_by_faiss_id: Dict[int, Dict] = {}
+        self._cached_rows: List[Dict] = []
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(self._CREATE_SQL)
+        if self._keep_in_ram:
+            self._refresh_cache()
+
+    def _refresh_cache(self) -> None:
+        if not self._keep_in_ram:
+            return
+        with self._connect() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM chunks").fetchall()]
+        self._cached_rows = rows
+        self._rows_by_chunk_id = {row["chunk_id"]: row for row in rows}
+        self._rows_by_faiss_id = {
+            int(row["faiss_id"]): row
+            for row in rows
+            if row.get("faiss_id") is not None
+        }
 
     @contextmanager
     def _connect(self) -> Generator:
@@ -270,6 +289,7 @@ class MetadataStore:
                     json.dumps(meta),
                 ),
             )
+        self._refresh_cache()
 
     def delete(self, chunk_ids: List[str]) -> List[int]:
         """
@@ -290,6 +310,7 @@ class MetadataStore:
                 f"DELETE FROM chunks WHERE chunk_id IN ({ph})",
                 chunk_ids,
             )
+        self._refresh_cache()
         return freed
 
     def delete_by_file(self, file_path: str) -> List[int]:
@@ -303,11 +324,15 @@ class MetadataStore:
             conn.execute(
                 "DELETE FROM chunks WHERE file_path = ?", (file_path,)
             )
+        self._refresh_cache()
         return freed
 
     # ---- Lookups ------------------------------------------------------------
 
     def get(self, chunk_id: str) -> Optional[Dict]:
+        if self._keep_in_ram:
+            row = self._rows_by_chunk_id.get(chunk_id)
+            return dict(row) if row else None
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM chunks WHERE chunk_id = ?", (chunk_id,)
@@ -315,6 +340,9 @@ class MetadataStore:
         return dict(row) if row else None
 
     def get_by_faiss_id(self, faiss_id: int) -> Optional[Dict]:
+        if self._keep_in_ram:
+            row = self._rows_by_faiss_id.get(int(faiss_id))
+            return dict(row) if row else None
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM chunks WHERE faiss_id = ?", (faiss_id,)
@@ -330,6 +358,8 @@ class MetadataStore:
 
     def content_hash_exists(self, content_hash: str) -> bool:
         """Return True if an identical chunk (same content hash) is stored."""
+        if self._keep_in_ram:
+            return any(row.get("content_hash") == content_hash for row in self._cached_rows)
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM chunks WHERE content_hash = ?",
@@ -338,6 +368,11 @@ class MetadataStore:
         return row is not None
 
     def chunk_id_for_hash(self, content_hash: str) -> Optional[str]:
+        if self._keep_in_ram:
+            for row in self._cached_rows:
+                if row.get("content_hash") == content_hash:
+                    return row.get("chunk_id")
+            return None
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT chunk_id FROM chunks WHERE content_hash = ?",
@@ -378,6 +413,18 @@ class MetadataStore:
         sql = "SELECT * FROM chunks"
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
+
+        if self._keep_in_ram:
+            rows = self._cached_rows
+            if faiss_ids is not None:
+                allowed = {int(fid) for fid in faiss_ids}
+                rows = [row for row in rows if row.get("faiss_id") in allowed]
+            if metadata_filter:
+                rows = [
+                    row for row in rows
+                    if all(row.get(key) == value for key, value in metadata_filter.items() if key in _filterable)
+                ]
+            return [dict(r) for r in rows]
 
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -422,6 +469,8 @@ class MetadataStore:
 
     @property
     def total(self) -> int:
+        if self._keep_in_ram:
+            return len(self._cached_rows)
         with self._connect() as conn:
             return int(
                 conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
@@ -467,6 +516,7 @@ class VectorStoreManager:
         index_path: str = "./cache/faiss_index",
         chroma_persist_dir: str = "./cache/chroma",
         embedding_dim: Optional[int] = None,
+        keep_full_db_in_ram: bool = True,
     ) -> None:
         """
         Args:
@@ -485,10 +535,14 @@ class VectorStoreManager:
         self.index_path = Path(index_path)
         self.chroma_persist_dir = chroma_persist_dir
         self.embedding_dim = embedding_dim
+        self.keep_full_db_in_ram = keep_full_db_in_ram
 
         # FAISS state
         self._faiss_index = None
-        self._meta: MetadataStore = MetadataStore(str(self.index_path) + ".db")
+        self._meta: MetadataStore = MetadataStore(
+            str(self.index_path) + ".db",
+            keep_in_ram=keep_full_db_in_ram,
+        )
 
         # Chroma state
         self._chroma_collection = None
@@ -660,7 +714,7 @@ class VectorStoreManager:
             self.index_path,
         )
 
-    def _faiss_load(self) -> bool:
+    def _faiss_load(self, expected_dim: Optional[int] = None) -> bool:
         faiss = self._faiss_import()
         idx_file    = str(self.index_path) + ".faiss"
         pkl_file    = str(self.index_path) + ".chunks.pkl"
@@ -669,6 +723,16 @@ class VectorStoreManager:
             return False
 
         self._faiss_index = faiss.read_index(idx_file)
+        self.embedding_dim = int(self._faiss_index.d)
+        if expected_dim is not None and self.embedding_dim != int(expected_dim):
+            logger.warning(
+                "Persisted FAISS index dimension (%d) does not match requested embedding dimension (%d)",
+                self.embedding_dim,
+                expected_dim,
+            )
+            self._faiss_index = None
+            self.embedding_dim = None
+            return False
         logger.info(
             "FAISS index loaded (%d vectors) <- %s.faiss",
             self._faiss_index.ntotal,
@@ -1070,7 +1134,11 @@ class VectorStoreManager:
                 self._faiss_save()
         # SQLite is updated on every write; no explicit flush needed.
 
-    def load_index(self, path: Optional[str] = None) -> bool:
+    def load_index(
+        self,
+        path: Optional[str] = None,
+        expected_dim: Optional[int] = None,
+    ) -> bool:
         """
         Load the index from disk.
 
@@ -1083,11 +1151,14 @@ class VectorStoreManager:
         if path is not None:
             original = self.index_path
             self.index_path = Path(path)
-            self._meta = MetadataStore(str(self.index_path) + ".db")
-            result = self._faiss_load()
+            self._meta = MetadataStore(
+                str(self.index_path) + ".db",
+                keep_in_ram=self.keep_full_db_in_ram,
+            )
+            result = self._faiss_load(expected_dim=expected_dim)
             self.index_path = original
             return result
-        return self._faiss_load()
+        return self._faiss_load(expected_dim=expected_dim)
 
     def save(self) -> None:
         """Backward-compatible alias for ``save_index()``."""
@@ -1113,20 +1184,23 @@ class VectorStoreManager:
                 except OSError:
                     logger.warning("Failed to remove stale vector-store artifact: %s", path)
             self._faiss_index = None
-            self._meta = MetadataStore(str(self.index_path) + ".db")
+            self._meta = MetadataStore(
+                str(self.index_path) + ".db",
+                keep_in_ram=self.keep_full_db_in_ram,
+            )
             self.embedding_dim = None
             return
 
         self._chroma_collection = None
 
-    def load(self) -> bool:
+    def load(self, expected_dim: Optional[int] = None) -> bool:
         """
         Backward-compatible alias for ``load_index()``.
 
         For Chroma, auto-loads when the collection is first opened.
         """
         if self.backend == "faiss":
-            return self.load_index()
+            return self.load_index(expected_dim=expected_dim)
         # Chroma auto-loads on open.
         self._chroma_ensure()
         return self._chroma_collection.count() > 0

@@ -49,6 +49,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from context_builder import ContextBuilder
@@ -238,8 +239,11 @@ class RAGOrchestrator:
         retriever = HybridRetriever(
             vector_store    = pipeline.vector_store,
             embedder        = pipeline.embedder,
+            rerank_embedder = getattr(pipeline, "rerank_embedder", None),
             semantic_weight = semantic_weight,
             keyword_weight  = keyword_weight,
+            rerank_top_k    = pipeline.retrieval_cfg.get("rerank_top_k"),
+            max_workers     = pipeline.retrieval_cfg.get("parallel_workers", 8),
         )
         prompt_builder = PromptBuilder(max_context_tokens=max_context_tokens)
         return cls(
@@ -314,8 +318,11 @@ class RAGOrchestrator:
             security_results = bundle.get("security_results", [])
             matched_resources = bundle.get("matched_resources", [])
         else:
-            code_results = self._retrieve_code(query, k_code, metadata_filter)
-            security_results = self._retrieve_security_rules(query, k_sec, code_results)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                code_future = executor.submit(self._retrieve_code, query, k_code, metadata_filter)
+                security_future = executor.submit(self._retrieve_security_rules, query, k_sec, [])
+                code_results = code_future.result()
+                security_results = security_future.result()
 
         # Assemble prompt
         prompt = self.context_builder.build(

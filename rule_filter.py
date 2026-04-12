@@ -12,7 +12,7 @@ class RuleFilter:
     """Select rules relevant to a set of tagged resources."""
 
     def __init__(self) -> None:
-        self._cache: Dict[Tuple[Tuple[str, ...], str, str], List[Dict]] = {}
+        self._cache: Dict[Tuple[Tuple[str, ...], str, str, Tuple[str, ...]], List[Dict]] = {}
 
     def filter_rules(
         self,
@@ -21,14 +21,21 @@ class RuleFilter:
         cloud_provider: str,
         category: str = "",
     ) -> List[Dict]:
+        rule_list = list(rules)
         normalized_resource_types = tuple(sorted({resource_type for resource_type in resource_types if resource_type}))
-        key = (normalized_resource_types, cloud_provider or "generic", category or "")
+        rule_signature = tuple(sorted(str(rule.get("rule_id", "")) for rule in rule_list))
+        key = (
+            normalized_resource_types,
+            cloud_provider or "generic",
+            category or "",
+            rule_signature,
+        )
         if key in self._cache:
             return list(self._cache[key])
 
         filtered = [
             rule
-            for rule in rules
+            for rule in rule_list
             if self._provider_matches(rule.get("cloud_provider", "generic"), cloud_provider)
             and self._resource_matches(rule.get("resource_type", "general"), normalized_resource_types, category)
         ]

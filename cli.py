@@ -84,8 +84,18 @@ def build_pipeline(cfg: dict):
     ing = cfg.get("ingestion", {})
     ck  = cfg.get("chunking", {})
     emb = cfg.get("embedding", {})
+    retr = cfg.get("retrieval", {})
     vs  = cfg.get("vector_store", {})
     llm = cfg.get("llm", {})
+
+    rerank_model = retr.get("rerank_model")
+    rerank_embedder = None
+    if rerank_model:
+        rerank_embedder = EmbeddingGenerator(
+            model_name=rerank_model,
+            cache_dir=emb.get("cache_dir", "./cache/embeddings"),
+            batch_size=retr.get("rerank_batch_size", emb.get("batch_size", 64)),
+        )
 
     chunker = IntelligentChunker(
         max_tokens_per_chunk=ck.get("max_tokens_per_chunk", 500),
@@ -103,22 +113,27 @@ def build_pipeline(cfg: dict):
         embedder=EmbeddingGenerator(
             model_name=emb.get("model", "sentence-transformers/all-MiniLM-L6-v2"),
             cache_dir=emb.get("cache_dir", "./cache/embeddings"),
-            batch_size=emb.get("batch_size", 32),
+            batch_size=emb.get("batch_size", 64),
         ),
+        rerank_embedder=rerank_embedder,
         vector_store=VectorStoreManager(
             backend=vs.get("backend", "faiss"),
             index_path=vs.get("index_path", "./cache/faiss_index"),
             chroma_persist_dir=vs.get("chroma_persist_dir", "./cache/chroma"),
+            keep_full_db_in_ram=vs.get("keep_full_db_in_ram", True),
         ),
         llm_client=LocalLLMClient(
             base_url=llm.get("base_url", "http://localhost:11434"),
             model=llm.get("model"),
             timeout=llm.get("timeout", 600),
             max_tokens=llm.get("max_tokens", 2048),
+            stream=llm.get("stream", False),
         ),
+        batch_embed_size=emb.get("batch_size", 64),
+        max_workers=retr.get("parallel_workers", 8),
         expand_dependencies=ck.get("resolve_dependencies", True),
         query_routing_cfg=cfg.get("query_routing", {}),
-        retrieval_cfg=cfg.get("retrieval", {}),
+        retrieval_cfg=retr,
         iam_cfg=cfg.get("iam", {}),
         workload_identity_cfg=cfg.get("workload_identity", {}),
         prompt_injection_cfg=cfg.get("prompt_injection", {}),
@@ -333,9 +348,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "--top-k",
         type=int,
-        default=5,
+        default=10,
         metavar="K",
-        help="Number of chunks to retrieve (default: 5)",
+        help="Number of chunks to retrieve (default: 10)",
     )
     p_query.add_argument(
         "--stream",

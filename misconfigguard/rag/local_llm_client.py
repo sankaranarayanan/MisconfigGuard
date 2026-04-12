@@ -63,6 +63,7 @@ class LocalLLMClient:
         model: Optional[str] = None,
         timeout: Optional[int] = None,
         max_tokens: Optional[int] = None,
+        stream: Optional[bool] = None,
     ):
         """
         Args:
@@ -70,6 +71,7 @@ class LocalLLMClient:
             model:      Model tag to use (must be pulled with `ollama pull`).
             timeout:    HTTP request timeout in seconds.
             max_tokens: Maximum tokens in the generated response.
+            stream:     Whether to use Ollama streaming responses by default.
         """
         llm_cfg = load_llm_config()
 
@@ -77,6 +79,7 @@ class LocalLLMClient:
         self.model = model or llm_cfg.get("model") or ""
         self.timeout = timeout if timeout is not None else llm_cfg.get("timeout", 600)
         self.max_tokens = max_tokens if max_tokens is not None else llm_cfg.get("max_tokens", 2048)
+        self.stream = stream if stream is not None else llm_cfg.get("stream", False)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -136,7 +139,7 @@ class LocalLLMClient:
             requests.Timeout:        If the request exceeds ``timeout`` seconds.
             requests.RequestException: For other HTTP / connection errors.
         """
-        payload = self._build_payload(prompt, stream=True)
+        payload = self._build_payload(prompt, stream=self.stream)
         logger.debug(
             "Sending prompt to %s/%s (%d chars)",
             self.model,
@@ -148,10 +151,12 @@ class LocalLLMClient:
                 self._generate_url,
                 json=payload,
                 timeout=self.timeout,
-                stream=True,
+                stream=self.stream,
             ) as resp:
                 resp.raise_for_status()
-                return self._collect_stream(resp)
+                if self.stream:
+                    return self._collect_stream(resp)
+                return resp.json().get("response", "")
         except requests.Timeout:
             logger.error("Ollama request timed out after %ds", self.timeout)
             raise

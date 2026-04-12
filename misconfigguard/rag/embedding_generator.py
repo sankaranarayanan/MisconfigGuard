@@ -2,8 +2,9 @@
 EmbeddingGenerator — Produces dense vector embeddings for text chunks
 using a locally-running sentence-transformers model.
 
-Embeddings are cached to disk (per-text SHA-256 key) so that re-indexing
-an unchanged file does not re-run the neural model.
+Embeddings are cached to disk (per-model, per-text SHA-256 key) so that
+re-indexing an unchanged file does not re-run the neural model while still
+avoiding stale cache collisions after model changes.
 
 Recommended models:
     sentence-transformers/all-MiniLM-L6-v2  (fast, 384-dim)
@@ -148,9 +149,9 @@ class EmbeddingGenerator:
     # Disk cache helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _cache_key(text: str) -> str:
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    def _cache_key(self, text: str) -> str:
+        payload = f"{self.model_name}\0{text}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _cache_path(self, key: str) -> Path:
         return self.cache_dir / f"{key}.pkl"
@@ -197,6 +198,14 @@ class EmbeddingGenerator:
                 uncached_indices.append(i)
                 uncached_texts.append(text)
 
+        logger.info(
+            "Embedding batch: total_texts=%d cached=%d new=%d model=%s",
+            len(texts),
+            len(texts) - len(uncached_texts),
+            len(uncached_texts),
+            self.model_name,
+        )
+
         # Batch-encode uncached texts
         if uncached_texts:
             logger.debug(
@@ -226,4 +235,7 @@ class EmbeddingGenerator:
     @property
     def embedding_dim(self) -> int:
         """Return the output dimensionality of the current model."""
-        return self.model.get_sentence_embedding_dimension()
+        model = self.model
+        if hasattr(model, "get_embedding_dimension"):
+            return model.get_embedding_dimension()
+        return model.get_sentence_embedding_dimension()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-_SEVERITIES = ("high", "medium", "low")
+_SEVERITIES = ("critical", "high", "medium", "low")
 
 
 class PolicyEvaluator:
@@ -18,7 +18,7 @@ class PolicyEvaluator:
 
         for severity in _SEVERITIES:
             count = int(summary.get(severity, 0) or 0)
-            max_allowed = int(policy.get("max_allowed", {}).get(severity, 0 if severity == "high" else 999999) or 0)
+            max_allowed = int(policy.get("max_allowed", {}).get(severity, 0 if severity in ("critical", "high") else 999999) or 0)
             fail_on = bool(policy.get("fail_on", {}).get(severity, False))
 
             if count <= 0:
@@ -41,6 +41,7 @@ class PolicyEvaluator:
             "status": "fail" if violations else "pass",
             "violations": violations,
             "summary": {
+                "critical": int(summary.get("critical", 0) or 0),
                 "high": int(summary.get("high", 0) or 0),
                 "medium": int(summary.get("medium", 0) or 0),
                 "low": int(summary.get("low", 0) or 0),
