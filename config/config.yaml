@@ -99,3 +99,75 @@ policy:
 logging:
   level: "INFO"
   file: "./logs/misconfigguard.log"
+
+# ---------------------------------------------------------------------------
+# Security Layer Configuration
+# ---------------------------------------------------------------------------
+
+input_sanitizer:
+  enabled: true
+  max_length: 32768               # max input characters; larger inputs rejected
+  allow_html: false               # reject HTML/script tags in inputs
+  allow_path_traversal: false     # reject ../ path traversal sequences
+  allow_prompt_injection_patterns: false  # reject known jailbreak patterns
+  strip_control_chars: true       # strip non-printable control characters
+  allow_newlines: true
+
+rag_poison_defense:
+  enabled: true
+  entropy_threshold: 5.5          # Shannon entropy (bits/char) above which chunks are suspect
+  repetition_threshold: 0.6       # bigram repetition ratio above which chunks are suspect
+  min_trust_score: 0.5            # chunks below this trust score are filtered from retrieval
+  reject_on_injection: true       # hard-reject chunks matching injection patterns
+
+rbac:
+  enabled: true
+  default_role: "analyst"         # role assigned when no explicit role is provided
+  roles:
+    viewer:
+      permissions:
+        - read_report
+    analyst:
+      permissions:
+        - read_report
+        - export_report
+        - run_scan
+        - read_policy
+        - invoke_llm
+    engineer:
+      permissions:
+        - read_report
+        - export_report
+        - run_scan
+        - schedule_scan
+        - manage_index
+        - read_policy
+        - write_policy
+        - invoke_llm
+        - approve_finding
+    admin:
+      permissions: all
+
+llm_guardrails:
+  enabled: true
+  strip_unknown_fields: true      # drop unexpected fields from structured LLM output
+  allow_external_urls: false      # redact external URLs in LLM output
+  max_field_length: 8000          # max characters per single output field
+
+output_controls:
+  enabled: true
+  redact_secrets: true            # regex-based secret redaction in all output fields
+  strip_internal_metadata: true   # remove trust_score, _validation etc. from final output
+  default_max_issues: 0           # 0 = unlimited; set to cap issues per report
+
+observability:
+  enabled: true
+  audit_log_path: "./logs/audit.jsonl"
+  max_buffer_size: 10000          # max events held in memory ring buffer
+  log_to_stdlib: true             # also emit audit events through Python logging
+
+human_in_the_loop:
+  enabled: false                  # set to true to require human approval for critical/high
+  require_approval_above: "HIGH"  # CRITICAL | HIGH | MEDIUM | LOW
+  default_timeout: 0              # seconds to wait (0 = indefinite)
+  auto_approve_below_threshold: true  # auto-approve findings below threshold
