@@ -1,4 +1,6 @@
 # MisconfigGuard — Configuration File
+# Optimized 2026-04-21: hybrid weight bug fix, per-intent tuning, cross-encoder
+# reranker, token budget alignment, expanded keyword routing, validation layer.
 
 ingestion:
   supported_extensions: [".tf", ".yml", ".yaml", ".json"]
@@ -25,32 +27,36 @@ vector_store:
   backend: "faiss"                     # "faiss" (default) or "chroma"
   index_path: "./cache/faiss_index"
   chroma_persist_dir: "./cache/chroma"
-  top_k: 20
+  top_k: 50                            # raised: wider candidate pool for cross-encoder reranking
   keep_full_db_in_ram: true
 
 llm:
   base_url: "http://localhost:11434"   # Ollama default
-  model: "llama3.1"                  # or "mistral"
+  model: "llama3.1"                    # or "mistral"
   timeout: 1600
   max_tokens: 4096
   stream: false
 
 retrieval:
-  top_k_code: 15             # code chunks retrieved per query
-  top_k_security: 5          # security rules retrieved per query
-  semantic_weight: 0.7       # weight for vector-similarity score
-  keyword_weight: 0.35        # weight for keyword (BM25) relevance score
-  rerank_model: "BAAI/bge-large-en"  # higher-accuracy model used to rerank retrieved candidates
-  rerank_top_k: 20           # number of merged candidates reranked before trimming to top_k_code
+  # FIX: weights now sum to 1.0 (was 0.7 + 0.35 = 1.05 — broke score normalisation)
+  semantic_weight: 0.65      # weight for vector-similarity score
+  keyword_weight: 0.35       # weight for keyword (BM25) relevance score
+  top_k_code: 12             # final code chunks delivered to prompt (reduced from 15 for quality)
+  top_k_security: 7          # security rules retrieved per query (raised from 5)
+  # FIX: switched to cross-encoder for meaningful reranking (was bi-encoder bge-large-en)
+  rerank_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  rerank_top_k: 50           # wide candidate pool before cross-encoder trims to top_k_code
   cache_ttl: 600             # retrieval cache TTL in seconds (0 = disabled)
-  max_context_tokens: 12000   # max tokens in assembled prompt context
+  # FIX: aligned with PromptBuilder construction (was not wired from config, defaulted to 3000)
+  max_context_tokens: 8000   # max tokens in assembled prompt context (conservative for latency)
   parallel_workers: 8
 
 query_routing:
   enabled: true
   use_llm_routing: true
   routing_model: "llama3.1"
-  routing_max_tokens: 20
+  # FIX: raised from 20 — prevents llama3.1 reasoning tokens from truncating the label
+  routing_max_tokens: 50
   routing_cache_ttl: 300
   log_intent: true
 
@@ -59,30 +65,74 @@ rule_aware:
   cache_ttl: 300             # cache filtered rule combinations for repeated queries
   include_generic_rules: true
 
+# Per-intent retrieval overrides
+# Each intent can override the global retrieval defaults to match its search pattern.
+# Secrets/network/prompt_injection benefit from keyword-dominant search (exact patterns).
+# IAM/compliance benefit from semantic-dominant search (conceptual relationships).
+intent_overrides:
+  iam:
+    semantic_weight: 0.75
+    keyword_weight: 0.25
+    top_k_code: 15
+    top_k_security: 10         # IAM is highest-risk; CIS Azure has 30+ controls
+  secrets:
+    semantic_weight: 0.25
+    keyword_weight: 0.75       # exact pattern matching: "password =", "api_key =", "secret ="
+    top_k_code: 12
+    top_k_security: 8
+    entropy_threshold: 3.5     # lowered: catches structured tokens (SAS, some AWS keys) at ~3.8
+  network:
+    semantic_weight: 0.35
+    keyword_weight: 0.65       # exact CIDR: "0.0.0.0/0", port numbers, "AllowAll"
+    top_k_code: 12
+    top_k_security: 7
+  workload_identity:
+    semantic_weight: 0.60
+    keyword_weight: 0.40       # mixed: OIDC keywords + conceptual trust relationships
+    top_k_code: 12
+    top_k_security: 8
+  prompt_injection:
+    semantic_weight: 0.30
+    keyword_weight: 0.70       # exact: "run:", "${{ }}", "env:", "ACTIONS_RUNNER_DEBUG"
+    top_k_code: 10
+    top_k_security: 7
+  compliance:
+    semantic_weight: 0.80
+    keyword_weight: 0.20       # conceptual regulation mapping; BM25 adds noise here
+    top_k_code: 10
+    top_k_security: 8
+  general_security:
+    semantic_weight: 0.65
+    keyword_weight: 0.35
+    top_k_code: 12
+    top_k_security: 7
+
 iam:
   max_roles_per_identity: 3  # flag identities exceeding this many role assignments
   high_privilege_roles:      # roles always checked regardless of scope
     - "Owner"
     - "Contributor"
     - "User Access Administrator"
+    - "Security Admin"        # added: grants security policy write access
+    - "Role Based Access Control Administrator"  # added: can assign roles
   use_llm: true              # enrich findings with LLM reasoning (requires Ollama)
   top_k_code: 15
-  top_k_security: 5
+  top_k_security: 10         # raised: matches intent_overrides.iam
 
 workload_identity:
   use_llm: true              # enrich workload identity findings with LLM reasoning
-  top_k_code: 15
-  top_k_security: 5
+  top_k_code: 12
+  top_k_security: 8
 
 prompt_injection:
   use_llm: true              # enrich prompt-injection findings with LLM validation when available
-  top_k_security: 5
+  top_k_security: 7
 
 secrets:
   use_llm: true              # enrich hardcoded secret findings with LLM reasoning
-  top_k_code: 15
-  top_k_security: 5
-  entropy_threshold: 4.5
+  top_k_code: 12
+  top_k_security: 8
+  entropy_threshold: 3.5     # FIX: lowered from 4.5 to catch structured tokens (SAS, some AWS keys)
 
 policy:
   path: "./policy.yaml"      # default policy file used by scanner.py

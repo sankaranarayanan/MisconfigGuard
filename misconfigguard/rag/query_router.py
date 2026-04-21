@@ -90,12 +90,41 @@ class QueryRouter:
     def _keyword_classify(self, query: str) -> QueryIntent:
         probe = (query or "").lower()
         mappings = [
-            (QueryIntent.IAM, ["managed identity", "managed identities", "role assignment", "contributor", "owner role", "rbac", "service principal", "iam", "permission"]),
-            (QueryIntent.WORKLOAD_IDENTITY, ["oidc", "workload identity", "federation", "issuer", "audience", "subject claim", "trust policy"]),
-            (QueryIntent.SECRETS, ["secret", "password", "api key", "token", "credential", "hardcoded", "entropy", "private key", "connection string"]),
-            (QueryIntent.PROMPT_INJECTION, ["prompt injection", "pipeline", "github actions", "azure devops", "ci/cd", "workflow yaml", "run:", "script:"]),
-            (QueryIntent.NETWORK, ["security group", "open port", "0.0.0.0", "ingress", "egress", "firewall", "public access", "acl"]),
-            (QueryIntent.COMPLIANCE, ["cis", "compliance", "benchmark", "policy", "standard", "regulation", "pci", "hipaa", "nist"]),
+            (QueryIntent.IAM, [
+                "managed identity", "managed identities", "role assignment",
+                "contributor", "owner role", "rbac", "service principal", "iam",
+                "permission", "access policy", "privilege escalation",
+                "azurerm_role_assignment", "aws_iam_role", "google_iam_binding",
+            ]),
+            (QueryIntent.WORKLOAD_IDENTITY, [
+                "oidc", "workload identity", "federation", "issuer", "audience",
+                "subject claim", "trust policy", "federated credential",
+                "azurerm_federated_identity_credential",
+            ]),
+            (QueryIntent.SECRETS, [
+                "secret", "password", "api key", "api_key", "token", "credential",
+                "hardcoded", "entropy", "private key", "connection string",
+                "connection_string", "sas_token", "oauth_token", "client_secret",
+                "access_key", "pat", "bearer",
+            ]),
+            # FIX: removed "pipeline" (too broad — matches Terraform/ADF pipelines).
+            # Kept CI/CD-specific terms only.
+            (QueryIntent.PROMPT_INJECTION, [
+                "prompt injection", "github actions", "azure devops", "ci/cd",
+                "workflow yaml", "run:", "script:", "${{", "actions_runner",
+                "untrusted input", "github.event", "pull_request_target",
+            ]),
+            (QueryIntent.NETWORK, [
+                "security group", "open port", "0.0.0.0", "ingress", "egress",
+                "firewall", "public access", "acl", "nsg",
+                "azurerm_network_security_rule", "azurerm_network_security_group",
+                "aws_security_group", "allow all", "port 22", "port 3389",
+                "unrestricted", "cidr_blocks", "source_port_ranges",
+            ]),
+            (QueryIntent.COMPLIANCE, [
+                "cis", "compliance", "benchmark", "policy", "standard",
+                "regulation", "pci", "hipaa", "nist", "soc2", "gdpr", "iso27001",
+            ]),
         ]
         for intent, keywords in mappings:
             if any(keyword in probe for keyword in keywords):

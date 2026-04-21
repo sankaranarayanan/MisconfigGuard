@@ -104,41 +104,65 @@ def _parse_structured_output(raw: str) -> Tuple[List[dict], str]:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # 3. Heuristic: look for severity keywords and construct a single issue
-    issues: List[dict] = []
-    severity_pattern = re.compile(
-        r"\b(CRITICAL|HIGH|MEDIUM|LOW|INFO)\b", re.IGNORECASE
+    # 3. Fallback: log the failure and return an empty issues list.
+    # Creating synthetic issues from heuristic severity-keyword scanning produces
+    # ghost findings with no affected_resource/CWE — a primary hallucination source.
+    logger.warning(
+        "LLM returned non-JSON output; no issues synthesised. Raw (first 300 chars): %s",
+        text[:300],
     )
-    if severity_pattern.search(text):
-        severity = severity_pattern.search(text).group(1).upper()
-        issues = [{
-            "title":             "Potential Security Issue",
-            "severity":          severity,
-            "description":       text[:500],
-            "affected_resource": "",
-            "recommendation":    "",
-            "cwe":               "",
-            "owasp":             "",
-        }]
+    return [], text[:300]
 
-    summary = text[:300] if not issues else text[:200]
-    return issues, summary
+
+_VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}
+_CWE_PATTERN  = re.compile(r"^CWE-\d+$")
+_OWASP_PATTERN = re.compile(r"^OWASP A\d{2}:\d{4}")
+
+
+def _validate_issue(issue: dict) -> Tuple[bool, List[str]]:
+    """
+    Validate a single normalised issue dict against schema rules.
+
+    Returns ``(is_valid, [error_messages])``.  Invalid CRITICAL/HIGH issues are
+    logged as warnings so analysts can triage model output quality.
+    """
+    errors: List[str] = []
+    sev = issue.get("severity", "")
+    if sev not in _VALID_SEVERITIES:
+        errors.append(f"invalid severity '{sev}'")
+    if sev in {"CRITICAL", "HIGH"}:
+        if not issue.get("affected_resource"):
+            errors.append("CRITICAL/HIGH requires non-empty affected_resource")
+        if not issue.get("cwe"):
+            errors.append("CRITICAL/HIGH requires a CWE mapping")
+        if not issue.get("evidence_snippet"):
+            errors.append("CRITICAL/HIGH requires an evidence_snippet")
+    cwe = issue.get("cwe", "")
+    if cwe and not _CWE_PATTERN.match(cwe):
+        errors.append(f"invalid CWE format '{cwe}' — expected 'CWE-NNN'")
+    owasp = issue.get("owasp", "")
+    if owasp and not _OWASP_PATTERN.match(owasp):
+        errors.append(f"invalid OWASP format '{owasp}' — expected 'OWASP AXX:YYYY'")
+    return len(errors) == 0, errors
 
 
 def _normalise_issues(raw_issues: List[Any]) -> List[dict]:
     """
-    Ensure every issue dict contains all expected keys with default values.
+    Ensure every issue dict contains all expected keys with default values,
+    then validate each issue and log warnings for schema violations.
     """
     required = {
-        "title":             "",
-        "severity":          "INFO",
-        "description":       "",
-        "affected_resource": "",
-        "recommendation":    "",
-        "cwe":               "",
-        "owasp":             "",
-        "rule_id":           "",
-        "rule_description":  "",
+        "title":            "",
+        "severity":         "INFO",
+        "description":      "",
+        "affected_resource":"",
+        "recommendation":   "",
+        "cwe":              "",
+        "owasp":            "",
+        "rule_id":          "",
+        "rule_description": "",
+        "file_path":        "",
+        "evidence_snippet": "",
     }
     result = []
     for item in (raw_issues or []):
@@ -146,10 +170,48 @@ def _normalise_issues(raw_issues: List[Any]) -> List[dict]:
             continue
         normalised = dict(required)
         normalised.update(item)
-        # Normalise severity to upper-case.
         normalised["severity"] = str(normalised["severity"]).upper()
+        is_valid, errors = _validate_issue(normalised)
+        if not is_valid:
+            logger.warning(
+                "Issue schema violation in '%s' [%s]: %s",
+                normalised.get("title", "<untitled>"),
+                normalised["severity"],
+                "; ".join(errors),
+            )
         result.append(normalised)
     return result
+
+
+def _compute_retrieval_confidence(
+    code_results: List[Any],
+    security_results: List[Any],
+    top_k_code: int,
+    top_k_security: int,
+) -> float:
+    """
+    Return a [0, 1] confidence score for the retrieval quality of this query.
+
+    Score components:
+    - 0.5 × chunk coverage  (how many of top_k_code slots were filled)
+    - 0.3 × avg score of top-3 chunks (proxy for semantic relevance)
+    - 0.2 × rule coverage   (how many of top_k_security slots were filled)
+
+    A score < 0.4 indicates weak retrieval and the result should be flagged
+    for manual review.
+    """
+    chunk_coverage = min(len(code_results) / max(top_k_code, 1), 1.0)
+    rule_coverage  = min(len(security_results) / max(top_k_security, 1), 1.0)
+
+    top3_scores: List[float] = []
+    for r in (code_results or [])[:3]:
+        score = getattr(r, "final_score", None) or (r.get("final_score") if isinstance(r, dict) else None)
+        if score is not None:
+            top3_scores.append(float(score))
+    avg_top3 = sum(top3_scores) / len(top3_scores) if top3_scores else 0.0
+
+    confidence = chunk_coverage * 0.5 + avg_top3 * 0.3 + rule_coverage * 0.2
+    return round(min(confidence, 1.0), 3)
 
 
 # ---------------------------------------------------------------------------

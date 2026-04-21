@@ -576,14 +576,17 @@ class RAGPipeline:
         """
         from rag_orchestrator import RAGOrchestrator
 
+        retrieval_cfg = getattr(self, "retrieval_cfg", {}) or {}
         orchestrator = RAGOrchestrator.from_pipeline(
-            pipeline         = self,
-            security_kb      = security_kb,
-            top_k_code       = top_k_code,
-            top_k_security   = top_k_security,
-            semantic_weight  = semantic_weight,
-            keyword_weight   = keyword_weight,
-            cache_ttl        = cache_ttl,
+            pipeline            = self,
+            security_kb         = security_kb,
+            top_k_code          = top_k_code,
+            top_k_security      = top_k_security,
+            semantic_weight     = semantic_weight,
+            keyword_weight      = keyword_weight,
+            cache_ttl           = cache_ttl,
+            # FIX: wire max_context_tokens from config instead of hardcoded 3000
+            max_context_tokens  = retrieval_cfg.get("max_context_tokens", 8000),
         )
         return orchestrator.analyze(
             query           = query,

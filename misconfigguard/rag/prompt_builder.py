@@ -102,17 +102,28 @@ no extra commentary):
       "title":             "<short issue title>",
       "severity":          "CRITICAL | HIGH | MEDIUM | LOW | INFO",
       "description":       "<what the issue is and why it matters>",
-      "affected_resource": "<Terraform resource / Kubernetes object / file path>",
+      "affected_resource": "<Terraform resource / Kubernetes object / file path — REQUIRED for CRITICAL/HIGH>",
+      "file_path":         "<exact file path from the context header above, or empty string>",
+      "evidence_snippet":  "<the exact problematic line(s) quoted from the code context — REQUIRED for CRITICAL/HIGH>",
       "recommendation":    "<concrete fix with config example if possible>",
-      "cwe":               "<CWE-XXX or empty string>",
-      "owasp":             "<OWASP AXX:YYYY or empty string>"
+      "cwe":               "<CWE-NNN — required for CRITICAL/HIGH, e.g. CWE-732>",
+      "owasp":             "<OWASP AXX:YYYY — required for CRITICAL/HIGH, e.g. OWASP A05:2021>"
     }
   ],
   "summary": "<1-3 sentence overall assessment>"
 }
 
-If no issues are found, return:
-  {"issues": [], "summary": "No security issues detected in the provided context."}\
+Severity calibration (apply strictly):
+- CRITICAL: direct exploitation possible with no prerequisites (e.g., unauthenticated public access, plaintext root credentials)
+- HIGH:     exploitation requires only low-privilege access or single misconfiguration (e.g., overly permissive RBAC, secret in env var)
+- MEDIUM:   hardening gap; exploitable only with additional context (e.g., missing MFA, weak TLS version)
+- LOW:      best practice violation with no direct exploit path
+- INFO:     informational observation
+
+Rules:
+- Only report issues evidenced by the provided code context. Do NOT fabricate findings.
+- For CRITICAL and HIGH issues, evidence_snippet, affected_resource, and cwe are mandatory.
+- If no issues are found, return exactly: {"issues": [], "summary": "No security issues detected in the provided context."}\
 """
 
 
