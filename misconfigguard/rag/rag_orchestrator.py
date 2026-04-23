@@ -50,6 +50,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from context_builder import ContextBuilder
@@ -58,6 +59,36 @@ from hybrid_retriever import HybridRetriever, RetrievalResult
 from rule_aware_retriever import RuleAwareRetriever
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FailureSignals:
+    """Quality signals used by the Skill-RAG router."""
+
+    hallucination_score: float
+    grounding_score: float
+    confidence_score: float
+    is_failure: bool
+    reason: str
+
+
+@dataclass
+class IterationRecord:
+    """Single Skill-RAG iteration trace record."""
+
+    query: str
+    docs: List[str]
+    answer: str
+    failure_signals: FailureSignals
+    chosen_skill: str
+
+
+@dataclass
+class SkillRAGResult:
+    """Final Skill-RAG output with deterministic trace."""
+
+    final_answer: str
+    iterations_trace: List[IterationRecord]
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +103,11 @@ def _cache_key(query: str, metadata_filter: Optional[Dict]) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _tokenize(text: str) -> List[str]:
+    """Return lowercase alphanumeric tokens for simple overlap scoring."""
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
 
 
 def _parse_structured_output(raw: str) -> Tuple[List[dict], str]:
@@ -270,6 +306,244 @@ class RAGOrchestrator:
 
         # TTL cache: key → (result_dict, expiry_timestamp)
         self._cache: Dict[str, Tuple[dict, float]] = {}
+
+    # ------------------------------------------------------------------
+    # Skill-RAG public API
+    # ------------------------------------------------------------------
+
+    def analyze_with_skills(
+        self,
+        query: str,
+        metadata_filter: Optional[Dict] = None,
+        stream: bool = False,
+        top_k_code: Optional[int] = None,
+        top_k_security: Optional[int] = None,
+        intent_hint: str = "",
+        max_iterations: int = 3,
+    ) -> SkillRAGResult:
+        """
+        Run a Skill-RAG inspired iterative loop.
+
+        Loop per iteration:
+        retrieve -> generate -> detect failure -> route skill -> retry
+        """
+        k_code = top_k_code or self.top_k_code
+        k_sec = top_k_security or self.top_k_security
+
+        current_query = query
+        iterations_trace: List[IterationRecord] = []
+        final_answer = ""
+
+        for _ in range(max_iterations):
+            matched_resources: List[dict] = []
+            if self.rule_aware_retriever is not None:
+                bundle = self.rule_aware_retriever.retrieve(
+                    query=current_query,
+                    top_k_code=k_code,
+                    top_k_rules=k_sec,
+                    metadata_filter=metadata_filter,
+                )
+                code_results = bundle.get("code_results", [])
+                security_results = bundle.get("security_results", [])
+                matched_resources = bundle.get("matched_resources", [])
+            else:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    code_future = executor.submit(self._retrieve_code, current_query, k_code, metadata_filter)
+                    security_future = executor.submit(self._retrieve_security_rules, current_query, k_sec, [])
+                    code_results = code_future.result()
+                    security_results = security_future.result()
+
+            prompt = self.context_builder.build(
+                query=current_query,
+                code_results=code_results,
+                security_results=security_results,
+                matched_resources=matched_resources,
+                intent_hint=intent_hint,
+            )
+
+            answer = self._call_llm(prompt, stream=stream)
+            final_answer = answer
+
+            docs = self._extract_doc_texts(code_results, security_results)
+            signals = self.detect_failure_signals(current_query, answer, docs)
+            chosen_skill = self.route_skill(current_query, signals)
+
+            iterations_trace.append(
+                IterationRecord(
+                    query=current_query,
+                    docs=docs,
+                    answer=answer,
+                    failure_signals=signals,
+                    chosen_skill=chosen_skill,
+                )
+            )
+
+            if chosen_skill == "exit" or not signals.is_failure:
+                break
+
+            if chosen_skill == "rewrite":
+                current_query = self.rewrite_query(current_query)
+            elif chosen_skill == "decompose":
+                subqueries = self.decompose_query(current_query)
+                current_query = " ; ".join(subqueries)
+            elif chosen_skill == "focus":
+                current_query = self.focus_query(current_query, docs)
+
+        return SkillRAGResult(final_answer=final_answer, iterations_trace=iterations_trace)
+
+    def detect_failure_signals(
+        self,
+        query: str,
+        answer: str,
+        retrieved_docs: List[str],
+    ) -> FailureSignals:
+        """Compute concrete failure scores and rule-based failure status."""
+        answer_tokens = _tokenize(answer)
+        doc_tokens = set(_tokenize(" ".join(retrieved_docs)))
+
+        if not answer_tokens:
+            hallucination_score = 1.0
+            grounding_score = 0.0
+        else:
+            missing = [tok for tok in answer_tokens if tok not in doc_tokens]
+            overlap = [tok for tok in answer_tokens if tok in doc_tokens]
+            hallucination_score = len(missing) / len(answer_tokens)
+            grounding_score = len(overlap) / len(answer_tokens)
+
+        confidence_score = 1.0
+        answer_lower = (answer or "").lower()
+        if "i think" in answer_lower:
+            confidence_score -= 0.3
+        if "maybe" in answer_lower:
+            confidence_score -= 0.2
+        if "possibly" in answer_lower:
+            confidence_score -= 0.2
+        if len((answer or "").split()) < 5:
+            confidence_score -= 0.4
+        confidence_score = max(0.0, min(1.0, confidence_score))
+
+        reasons: List[str] = []
+        if hallucination_score > 0.5:
+            reasons.append("hallucination_score > 0.5")
+        if grounding_score < 0.3:
+            reasons.append("grounding_score < 0.3")
+        if confidence_score < 0.5:
+            reasons.append("confidence_score < 0.5")
+
+        return FailureSignals(
+            hallucination_score=round(hallucination_score, 3),
+            grounding_score=round(grounding_score, 3),
+            confidence_score=round(confidence_score, 3),
+            is_failure=bool(reasons),
+            reason="; ".join(reasons) if reasons else "quality acceptable",
+        )
+
+    def route_skill(self, query: str, signals: FailureSignals) -> str:
+        """Deterministic router with fixed rule priority."""
+        query_lower = (query or "").lower()
+
+        if signals.hallucination_score > 0.5:
+            return "rewrite"
+        if signals.grounding_score < 0.3:
+            return "focus"
+        if self._has_multiple_intents(query_lower):
+            return "decompose"
+        return "exit"
+
+    def rewrite_query(self, query: str) -> str:
+        """Simplify query by removing common filler terms."""
+        filler = {
+            "please",
+            "kindly",
+            "just",
+            "actually",
+            "basically",
+            "i",
+            "think",
+            "maybe",
+            "possibly",
+            "can",
+            "could",
+            "you",
+            "help",
+            "me",
+        }
+        tokens = [tok for tok in _tokenize(query) if tok not in filler]
+        return " ".join(tokens) if tokens else query
+
+    def decompose_query(self, query: str) -> List[str]:
+        """Split a multi-intent query into sub-queries using and/or separators."""
+        parts = re.split(r"\b(?:and|or)\b", query, flags=re.IGNORECASE)
+        subqueries = [part.strip(" ,;:.\t\n") for part in parts if part.strip(" ,;:.\t\n")]
+        return subqueries or [query]
+
+    def focus_query(self, query: str, context: List[str]) -> str:
+        """Append top frequent context keywords to focus follow-up retrieval."""
+        stopwords = {
+            "the",
+            "is",
+            "a",
+            "an",
+            "to",
+            "of",
+            "for",
+            "in",
+            "on",
+            "with",
+            "and",
+            "or",
+            "this",
+            "that",
+            "it",
+            "as",
+            "by",
+            "be",
+            "are",
+            "at",
+            "from",
+            "check",
+            "issue",
+        }
+        frequencies: Dict[str, int] = {}
+        for token in _tokenize(" ".join(context)):
+            if token in stopwords or len(token) <= 2:
+                continue
+            frequencies[token] = frequencies.get(token, 0) + 1
+
+        ranked = sorted(frequencies.items(), key=lambda item: (-item[1], item[0]))
+        keywords = [token for token, _ in ranked[:5]]
+        if not keywords:
+            return query
+        return f"{query} focus:{' '.join(keywords)}"
+
+    def _has_multiple_intents(self, query_lower: str) -> bool:
+        return (
+            " and " in f" {query_lower} "
+            or " or " in f" {query_lower} "
+            or "," in query_lower
+            or ";" in query_lower
+        )
+
+    def _extract_doc_texts(self, code_results: List[Any], security_results: List[Any]) -> List[str]:
+        """Flatten retrieved artifacts into plain text evidence for scoring."""
+        docs: List[str] = []
+        for result in code_results or []:
+            if hasattr(result, "chunk"):
+                chunk = getattr(result, "chunk", {})
+                if isinstance(chunk, dict):
+                    docs.append(str(chunk.get("text") or chunk.get("content") or ""))
+            elif isinstance(result, dict):
+                docs.append(str(result.get("text") or result.get("content") or ""))
+            elif isinstance(result, str):
+                docs.append(result)
+
+        for result in security_results or []:
+            if hasattr(result, "description"):
+                docs.append(str(getattr(result, "description", "")))
+            elif isinstance(result, dict):
+                docs.append(str(result.get("description") or result.get("text") or ""))
+
+        return [doc for doc in docs if doc]
 
     # ------------------------------------------------------------------
     # Factory

@@ -2908,6 +2908,117 @@ class TestParseStructuredOutput:
         assert issues[0]["title"] == "Open SG"
         assert summary == "One issue."
 
+
+class TestSkillRAGOrchestrator:
+    """Focused tests for Skill-RAG failure detection, routing, and retries."""
+
+    class _StubRetriever:
+        def retrieve(self, query, top_k=5, metadata_filter=None):
+            # Return plain dicts to keep the test independent from vector backends.
+            docs = [
+                {
+                    "text": "nginx config test uses nginx -t and ssl certificate checks",
+                    "file_path": "infra/nginx.conf",
+                },
+                {
+                    "text": "ssl key permissions should be restrictive and certificate chain valid",
+                    "file_path": "infra/ssl.conf",
+                },
+            ]
+            return docs[:top_k]
+
+    class _StubPromptBuilder:
+        def build(self, query, code_results, security_results):
+            return f"query={query}; code={len(code_results)}; rules={len(security_results)}"
+
+    class _StubLLM:
+        model = "stub-llm"
+
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                # First answer intentionally weak: low confidence + hallucination.
+                return "I think maybe unicorn tokens are related"
+            return "Run nginx -t and validate ssl certificate chain and key permissions."
+
+    def test_failure_detection_flags_hallucination_and_low_confidence(self):
+        from rag_orchestrator import RAGOrchestrator
+
+        orchestrator = RAGOrchestrator(
+            hybrid_retriever=self._StubRetriever(),
+            prompt_builder=self._StubPromptBuilder(),
+            llm_client=self._StubLLM(),
+            cache_ttl=0,
+        )
+
+        signals = orchestrator.detect_failure_signals(
+            query="check nginx ssl",
+            answer="I think maybe dragon unicorn",
+            retrieved_docs=["nginx ssl certificate"],
+        )
+
+        assert signals.hallucination_score > 0.5
+        assert signals.confidence_score == 0.5
+        assert signals.is_failure is True
+
+    def test_skill_router_uses_exact_priority_rules(self):
+        from rag_orchestrator import FailureSignals, RAGOrchestrator
+
+        orchestrator = RAGOrchestrator(
+            hybrid_retriever=self._StubRetriever(),
+            prompt_builder=self._StubPromptBuilder(),
+            llm_client=self._StubLLM(),
+            cache_ttl=0,
+        )
+
+        rewrite_signals = FailureSignals(
+            hallucination_score=0.8,
+            grounding_score=0.1,
+            confidence_score=0.4,
+            is_failure=True,
+            reason="bad",
+        )
+        assert orchestrator.route_skill("a and b", rewrite_signals) == "rewrite"
+
+        focus_signals = FailureSignals(
+            hallucination_score=0.2,
+            grounding_score=0.1,
+            confidence_score=0.7,
+            is_failure=True,
+            reason="grounding low",
+        )
+        assert orchestrator.route_skill("single intent", focus_signals) == "focus"
+
+        decompose_signals = FailureSignals(
+            hallucination_score=0.2,
+            grounding_score=0.8,
+            confidence_score=0.8,
+            is_failure=False,
+            reason="ok",
+        )
+        assert orchestrator.route_skill("check nginx and ssl issue", decompose_signals) == "decompose"
+
+    def test_analyze_with_skills_returns_trace_and_retries(self):
+        from rag_orchestrator import RAGOrchestrator
+
+        llm = self._StubLLM()
+        orchestrator = RAGOrchestrator(
+            hybrid_retriever=self._StubRetriever(),
+            prompt_builder=self._StubPromptBuilder(),
+            llm_client=llm,
+            cache_ttl=0,
+        )
+
+        result = orchestrator.analyze_with_skills("check nginx config and ssl issue")
+
+        assert result.final_answer
+        assert len(result.iterations_trace) >= 2
+        assert result.iterations_trace[0].chosen_skill in {"rewrite", "focus", "decompose", "exit"}
+        assert llm.calls <= 3
+
     def test_json_embedded_in_prose(self):
         from rag_orchestrator import _parse_structured_output
 
